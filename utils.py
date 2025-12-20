@@ -12,6 +12,188 @@ import os
 import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
+from agg_methods import get_artifact_mask, compute_frame_differences
+from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
+
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import math
+from scipy.ndimage import (
+    binary_erosion,
+    gaussian_filter,
+    label,
+)
+from scipy.ndimage import binary_dilation
+def add_circular_border(mask, border_width=2):
+    dilated = binary_dilation(mask, iterations=border_width)
+    border = dilated & ~mask
+    return border
+
+
+def visualize_artifacts(
+    original_image, artifact_mask, alpha=0.5, border_width=2, border_color="green",
+):
+    import cv2
+
+    original_image = np.asarray(original_image, dtype=np.uint8)
+    if original_image.dtype != np.uint8:
+        original_image = (original_image * 255).astype(np.uint8)
+    
+    
+    artifact_mask = cv2.resize(artifact_mask.astype(np.uint8), (512, 512), interpolation=cv2.INTER_NEAREST).astype(bool)
+    original_image_permute = torch.from_numpy(original_image).permute(2, 0, 1).unsqueeze(0).float()
+
+    original_image = torch.nn.functional.interpolate(
+                    original_image_permute,
+                    size=(512, 512),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze().permute(1, 2, 0).numpy().astype(np.uint8)
+
+    red_fill = np.zeros_like(original_image)
+    red_fill[artifact_mask] = [255, 0, 0]
+
+    border_mask = add_circular_border(artifact_mask, border_width)
+
+    green_border = np.zeros_like(original_image)
+    green_border[border_mask] = [0, 255, 0] if border_color == "green" else border_color
+
+    result = np.where(
+        artifact_mask[:, :, None],
+        original_image * (1 - alpha) + red_fill * alpha,
+        original_image,
+    )
+    result = np.where(border_mask[:, :, None], green_border, result)
+
+    return result.astype(np.uint8)
+
+
+#maintains only last layer + removes cond 
+#structure: {t_N: (B,F)}
+
+def simplify_uncertainty_maps(uncertainty_maps):
+    timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+    last_layer = len(uncertainty_maps[timesteps[-1]]) -1
+    uncertainty_maps_last_layer = { k : uncertainty_maps[k][last_layer].chunk(2)[0] for k in uncertainty_maps}
+    return uncertainty_maps_last_layer
+
+
+
+
+def plot_ASCD(
+    latents_lst, 
+    images,
+    prompts = None,
+    uncertainty_maps = None,
+    out_dir = "uncertaintity_maps",
+    target_size=128,
+    cmap="hot",
+    start_idx = 5,
+    dpi=150,
+    ours = False,
+    ):
+
+
+    start_timestep = 20# 12
+    end_timestep   = -3 if ours is False else -3
+    os.makedirs(out_dir, exist_ok=True)
+
+   
+    uncertainty_maps = simplify_uncertainty_maps(uncertainty_maps)
+
+    sequence = latents_lst if ours is False else uncertainty_maps
+
+
+    
+
+    timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+  
+    sequence_len = latents_lst[0].shape[0] if ours is False else sequence[timesteps[0]].shape[0]
+
+    for sample_id in range(sequence_len):
+        if ours is False:
+            image_sequence = [np.array(latent[sample_id].cpu()).transpose(1, 2, 0) for latent in sequence]
+        else:
+            image_sequence = [np.array(sequence[ts][sample_id].cpu()).transpose(1, 2, 0) for ts in sequence]
+
+        #print(image_sequence[0].shape)
+        #exit(1)
+        image_sequence = image_sequence[start_timestep:end_timestep]
+
+        differences = compute_frame_differences(image_sequence)
+        artifact_mask = get_artifact_mask(
+            image_sequence,
+            mad_scale= 3 if ours is False else 10,
+            min_area = 4,
+            max_area = 10000000,
+            min_width = 1,
+            expand_size = 0,
+        )
+
+
+        result_image = visualize_artifacts(images[sample_id], artifact_mask, border_width=2)
+        img          = Image.fromarray(result_image.astype(np.uint8))
+        img.save(f"{out_dir}/binary_mask{start_idx+sample_id}.png")
+
+        artifact_data = []
+        non_artifact_data = []
+
+        for diff in differences:
+            artifact_data.append(diff[artifact_mask])
+            non_artifact_data.append(diff[~artifact_mask])
+
+
+        artifact_acceleration = np.diff([np.mean(d) for d in artifact_data])
+        non_artifact_acceleration = np.diff([np.mean(d) for d in non_artifact_data])
+
+        fig = plt.figure(figsize=(28, 7.5), constrained_layout=True)
+        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.8])
+
+        ax1 = fig.add_subplot(gs[0])
+        result_image = visualize_artifacts(images[sample_id], artifact_mask, border_width=2, alpha=0.0, border_color=[255,0,0])
+        ax1.imshow(result_image)
+        ax1.set_title(f"Detected Artifacts", fontsize=14)
+        ax1.axis("off")
+
+        #print(len(differences))
+        #exit(1)
+
+        differences = differences[::2]
+
+        num_images = len(differences)
+        cols = math.ceil(math.sqrt(num_images))
+        rows = math.ceil(num_images / cols)
+        
+        inner_gs = gs[1].subgridspec(rows, cols, wspace=0.05, hspace=0.05)
+        for i in range(num_images):
+            sub_ax = fig.add_subplot(inner_gs[i])
+            im = sub_ax.imshow(differences[i].mean(2), cmap='viridis')
+            sub_ax.set_title(f"$\Delta_{{{i + start_timestep + 1}}}$", fontsize=14)
+            sub_ax.axis('off')
+            fig.colorbar(im, ax=sub_ax, fraction=0.046, pad=0.02)
+
+        ax3 = fig.add_subplot(gs[2])
+        ax3.plot(artifact_acceleration, label='Artifact region', color='red', linewidth=2)
+        ax3.plot(non_artifact_acceleration, label='Non-artifact region', color='blue', linewidth=2)
+        ax3.set_title('Acceleration Comparison', fontsize=14)
+        ax3.set_xlabel('Time', fontsize=12)
+        ax3.set_ylabel('Acceleration', fontsize=12)
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        plt.savefig(f"{out_dir}/accelration_mask{start_idx+sample_id}.png", dpi=300, bbox_inches="tight")
+
+
+       
+
+        #for diff in differences:
+        #    artifact_data.append(diff[artifact_mask])
+        #    non_artifact_data.append(diff[~artifact_mask])
+
+        
+    
+              
+        
 
 
 
@@ -23,10 +205,13 @@ def plot_uncertintiy_maps(
     out_dir = "uncertaintity_maps",
     target_size=128,
     cmap="hot",
+    start_idx = 0,
     dpi=150):
 
     os.makedirs(out_dir, exist_ok=True)
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+
+    
     n_timesteps = len(timesteps)
     example_ts = timesteps[0]
 
@@ -40,143 +225,305 @@ def plot_uncertintiy_maps(
     img_resize = transforms.Resize((target_size, target_size))
 
     for sample_idx in range(num_samples):
-        for map_idx in range(2):
-        
-            fig, axes = plt.subplots(
-                n_timesteps,
-                n_cols,
-                figsize=(4.5 * n_cols, 4.0 * n_timesteps)
-            )
-
-            # Handle single-row case
-            if n_timesteps == 1:
-                axes = axes.reshape(1, -1)
-
-            for row_idx, ts in enumerate(timesteps):
-                # ------------------
-                # Column 0: Image
-                # ------------------
-                ax = axes[row_idx, 0]
-
-                img = img_resize(images[sample_idx])
-                ax.imshow(img)
-                ax.set_ylabel(
-                    f"t = {ts}",
-                    rotation=0,
-                    labelpad=40,
-                    va="center",
-                    fontsize=24
+        if False: #vis by layer
+            for map_idx in range(2):
+            
+                fig, axes = plt.subplots(
+                    n_timesteps,
+                    n_cols,
+                    figsize=(4.5 * n_cols, 4.0 * n_timesteps)
                 )
 
-                ax.set_xticks([])
-                ax.set_yticks([])
-                for spine in ax.spines.values():
-                    spine.set_visible(False)
+                # Handle single-row case
+                if n_timesteps == 1:
+                    axes = axes.reshape(1, -1)
+
+                for row_idx, ts in enumerate(timesteps):
+                    # ------------------
+                    # Column 0: Image
+                    # ------------------
+                    ax = axes[row_idx, 0]
+
+                    img = img_resize(images[sample_idx])
+                    ax.imshow(img)
+                    ax.set_ylabel(
+                        f"t = {ts}",
+                        rotation=0,
+                        labelpad=40,
+                        va="center",
+                        fontsize=24
+                    )
+
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    for spine in ax.spines.values():
+                        spine.set_visible(False)
 
 
-                for col_idx in range(n_cols-1):
-                    col = col_idx + 1
+                    for col_idx in range(n_cols-1):
+                        col = col_idx + 1
 
-                    #print(row_idx, col)
-                
-                    uncertainty = uncertainty_maps[ts][col_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
-                    if uncertainty.max().item() == uncertainty.min().item():
-                        uncertainty*=0
-                    else:
-                        uncertainty = (uncertainty - uncertainty.min() ) / (uncertainty.max()- uncertainty.min())
-
+                        #print(row_idx, col)
                     
+                        uncertainty = uncertainty_maps[ts][col_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
+                        if uncertainty.max().item() == uncertainty.min().item():
+                            uncertainty*=0
+                        else:
+                            uncertainty = (uncertainty - uncertainty.min() ) / (uncertainty.max()- uncertainty.min())
+
+                        
 
 
-                    axes[row_idx, col].imshow(uncertainty, cmap='hot')
-                    if row_idx == 0:
-                        axes[row_idx, col].set_title(f'upConv{col}', fontsize=18, pad=12)
-                    axes[row_idx, col].axis('off')
-                    
-                    
-            plt.suptitle(f'Sample {sample_idx}', 
-                        fontsize=20, fontweight='bold',y=0.98)
-            plt.tight_layout(rect=[0.08, 0.05, 1, 0.95])
-            vis_file_name = f'sample_{sample_idx}_uncond.png' if map_idx == 0 else f'sample_{sample_idx}_cond.png'
-            plt.savefig(os.path.join(out_dir, f'{vis_file_name}'), dpi=150, bbox_inches='tight')
-            plt.close()
+                        axes[row_idx, col].imshow(uncertainty, cmap='hot')
+                        if row_idx == 0:
+                            axes[row_idx, col].set_title(f'upConv{col}', fontsize=18, pad=12)
+                        axes[row_idx, col].axis('off')
+                        
+                        
+                plt.suptitle(f'Sample {sample_idx+start_idx}', 
+                            fontsize=20, fontweight='bold',y=0.98)
+                plt.tight_layout(rect=[0.08, 0.05, 1, 0.95])
+                vis_file_name = f'sample_{sample_idx+start_idx}_uncond.png' if map_idx == 0 else f'sample_{sample_idx+start_idx}_cond.png'
+                plt.savefig(os.path.join(out_dir, f'{vis_file_name}'), dpi=150, bbox_inches='tight')
+                plt.close()
 
 
         # ------------------
         # Create enlarged visualizations for the last layer
         # ------------------
-        enlarged_vis_dir = os.path.join(out_dir, 'enlarged_dir')
-        os.makedirs(enlarged_vis_dir, exist_ok=True)
-        
         last_layer_idx = n_cols - 2  # Last uncertainty map column
-        
-        for map_idx in range(2):
-            # Create figure with 2 columns (original image + uncertainty map)
-            fig, axes = plt.subplots(
-                n_timesteps, 
-                2,
-                figsize=(12, 5 * n_timesteps)
-            )
-            
-            # Handle single-row case
-            if n_timesteps == 1:
-                axes = axes.reshape(1, -1)
-            
-            for row_idx, ts in enumerate(timesteps):
-                # Left column: Original image at full resolution
-                ax_img = axes[row_idx, 0]
-                ax_img.imshow(images[sample_idx])
-                ax_img.set_ylabel(
-                    f"t = {ts}",
-                    rotation=0,
-                    labelpad=40,
-                    va="center",
-                    fontsize=20
-                )
+        enlarged_vis_dir = os.path.join(out_dir, 'full_review')
+        os.makedirs(enlarged_vis_dir, exist_ok=True)
+       
+        if n_timesteps > 6:
+
+            #import numpy as np
+            for map_idx in range(2):
+                # NEW VISUALIZATION: Grid layout for many timesteps
+                # Calculate grid dimensions
+                grid_cols = int(np.ceil(np.sqrt(n_timesteps + 1)))  # +1 for the image
+                grid_rows = int(np.ceil((n_timesteps + 1) / grid_cols))
+                
+                fig = plt.figure(figsize=(4 * grid_cols, 4 * grid_rows))
+                gs = fig.add_gridspec(grid_rows, grid_cols, hspace=0.4, wspace=0.3)
+                
+                # First cell: Original image resized to 64x64
+                ax_img = fig.add_subplot(gs[0, 0])
+                img_resized = torch.nn.functional.interpolate(
+                    torch.from_numpy(np.array(images[sample_idx])).permute(2, 0, 1).unsqueeze(0).float(),
+                    size=(256, 256),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze().permute(1, 2, 0).numpy().astype(np.uint8)
+                ax_img.imshow(img_resized)
+                ax_img.set_title('Original Image', fontsize=12, fontweight='bold')
                 ax_img.set_xticks([])
                 ax_img.set_yticks([])
                 for spine in ax_img.spines.values():
                     spine.set_visible(False)
                 
-                # Right column: Uncertainty map resized to 512x512
-                ax_map = axes[row_idx, 1]
-                uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
+                # Remaining cells: Uncertainty maps with colorbars
+                for idx, ts in enumerate(timesteps):
+                    cell_idx = idx + 1  # Offset by 1 because first cell is the image
+                    row = cell_idx // grid_cols
+                    col = cell_idx % grid_cols
+                    
+                    ax_map = fig.add_subplot(gs[row, col])
+                    uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
+                    
+                    if uncertainty.max().item() == uncertainty.min().item():
+                        uncertainty *= 0
+                    
+                    # Resize uncertainty map to 64x64
+                    uncertainty_resized = torch.nn.functional.interpolate(
+                        uncertainty.unsqueeze(0).unsqueeze(0),
+                        size=(256, 256),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze()
+                    
+                    im = ax_map.imshow(uncertainty_resized, cmap='hot')
+                    ax_map.set_title(f't = {ts}', fontsize=10, fontweight='bold')
+                    ax_map.set_xticks([])
+                    ax_map.set_yticks([])
+                    for spine in ax_map.spines.values():
+                        spine.set_visible(False)
+                    
+                    # Add colorbar next to each map
+                    cbar = plt.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
+                    cbar.ax.tick_params(labelsize=8)
                 
-                if uncertainty.max().item() == uncertainty.min().item():
-                    uncertainty *= 0
-                else:
-                    uncertainty = (uncertainty - uncertainty.min()) / (uncertainty.max() - uncertainty.min())
-                
-                # Resize uncertainty map to match original image size (512x512)
-                uncertainty_resized = torch.nn.functional.interpolate(
-                    uncertainty.unsqueeze(0).unsqueeze(0),
-                    size=(512, 512),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze()
-                
-                ax_map.imshow(uncertainty_resized, cmap='hot')
-                ax_map.set_xticks([])
-                ax_map.set_yticks([])
-                for spine in ax_map.spines.values():
-                    spine.set_visible(False)
+                map_type = 'uncond' if map_idx == 0 else 'cond'
+                plt.suptitle(
+                    f'Sample {sample_idx+start_idx} - {map_type.upper()} - Last Layer', 
+                    fontsize=16, 
+                    fontweight='bold'
+                )
+
+                enlarged_file_name = f'enlarged_sample_{sample_idx+start_idx}_{map_type}.png'
+                plt.savefig(
+                    os.path.join(enlarged_vis_dir, enlarged_file_name),
+                    dpi=dpi,
+                    bbox_inches='tight'
+                )
+                plt.close()
+              
+        else:
+       
+            enlarged_vis_dir = os.path.join(out_dir, 'enlarged_dir')
+            os.makedirs(enlarged_vis_dir, exist_ok=True)
             
-            map_type = 'uncond' if map_idx == 0 else 'cond'
-            plt.suptitle(
-                f'Sample {sample_idx} - {map_type.upper()} - Last Layer', 
-                fontsize=20, 
-                fontweight='bold',
-                y=0.98
-            )
-            plt.tight_layout(rect=[0.08, 0.02, 1, 0.96])
             
-            enlarged_file_name = f'enlarged_sample_{sample_idx}_{map_type}.png'
-            plt.savefig(
-                os.path.join(enlarged_vis_dir, enlarged_file_name),
-                dpi=dpi,
-                bbox_inches='tight'
-            )
-            plt.close()
+            for map_idx in range(2):
+                # Create figure with 2 columns (original image + uncertainty map)
+                fig, axes = plt.subplots(
+                    n_timesteps, 
+                    2,
+                    figsize=(12, 5 * n_timesteps)
+                )
+                
+                # Handle single-row case
+                if n_timesteps == 1:
+                    axes = axes.reshape(1, -1)
+                
+                for row_idx, ts in enumerate(timesteps):
+                    # Left column: Original image at full resolution
+                    ax_img = axes[row_idx, 0]
+                    ax_img.imshow(images[sample_idx])
+                    ax_img.set_ylabel(
+                        f"t = {ts}",
+                        rotation=0,
+                        labelpad=40,
+                        va="center",
+                        fontsize=20
+                    )
+                    ax_img.set_xticks([])
+                    ax_img.set_yticks([])
+                    for spine in ax_img.spines.values():
+                        spine.set_visible(False)
+                    
+                    # Right column: Uncertainty map resized to 512x512
+                    ax_map = axes[row_idx, 1]
+                    uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
+
+                   
+                    
+                    if uncertainty.max().item() == uncertainty.min().item():
+                        uncertainty *= 0
+                    else:
+                        pass
+                        #uncertainty = (uncertainty - uncertainty.min()) / (uncertainty.max() - uncertainty.min())
+                    
+                    # Resize uncertainty map to match original image size (512x512)
+                    uncertainty_resized = torch.nn.functional.interpolate(
+                        uncertainty.unsqueeze(0).unsqueeze(0),
+                        size=(512, 512),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze()
+                    
+                    ax_map.imshow(uncertainty_resized, cmap='hot')
+                    ax_map.set_xticks([])
+                    ax_map.set_yticks([])
+                    for spine in ax_map.spines.values():
+                        spine.set_visible(False)
+                
+                map_type = 'uncond' if map_idx == 0 else 'cond'
+                plt.suptitle(
+                    f'Sample {sample_idx+start_idx} - {map_type.upper()} - Last Layer', 
+                    fontsize=20, 
+                    fontweight='bold',
+                    y=0.98
+                )
+                plt.tight_layout(rect=[0.08, 0.02, 1, 0.96])
+                
+                enlarged_file_name = f'enlarged_sample_{sample_idx+start_idx}_{map_type}.png'
+                plt.savefig(
+                    os.path.join(enlarged_vis_dir, enlarged_file_name),
+                    dpi=dpi,
+                    bbox_inches='tight'
+                )
+                plt.close()
            
 
 
+
+def save_uncertainty_maps(
+        uncertainty_maps, 
+        sample_idx_copy,
+        latents_lst,
+        out_dir = None,
+        cmap="hot",
+        dpi=150,
+    
+    ):
+
+    timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+   
+    example_ts = timesteps[0]
+    last_layer = sorted(uncertainty_maps[example_ts].keys())[-1]
+
+    num_samples = int(uncertainty_maps[example_ts][last_layer].shape[0] / 2)
+    print(len(latents_lst))
+    print(latents_lst[0].shape)
+    exit(1)
+    for sample_idx in range(num_samples):
+        for map_idx in range(2):
+            for row_idx, ts in enumerate(timesteps):
+                uncertainty = uncertainty_maps[ts][last_layer].chunk(2)[map_idx][sample_idx].squeeze(0)
+                save_dir = f"{out_dir}/{sample_idx+sample_idx_copy}"
+                #os.makedirs(save_dir, exist_ok=True)
+                ext  = "uncond" if map_idx == 0 else "cond"
+                torch.save(uncertainty, f"{save_dir}/{ts}_{ext}.pt")
+                
+                '''
+                plt.imshow(uncertainty, cmap='hot')  # cmap can be 'hot', 'viridis', etc.
+                plt.colorbar()             # optional: adds a color scale
+
+                # Save as image
+                plt.savefig(f"{save_dir}/vis_{ts:04d}_{ext}.jpg", dpi=150, bbox_inches='tight')  # dpi can be adjusted
+                plt.close()  # close the figure to free memory'''
+
+
+
+           
+
+
+
+class HeatmapEvalDataset(Dataset):
+    def __init__(self, output_dir):
+        self.samples = []
+        for entry in os.listdir(output_dir):
+            full_path = os.path.join(output_dir, entry)
+            if os.path.isdir(full_path):
+                image_path = f"{full_path}/output.jpg"
+                prompt_path = f"{full_path}/prompt.txt"
+                if os.path.exists(image_path) and os.path.exists(prompt_path):
+                    with open(prompt_path, "r") as f:
+                        prompt = f.readline().strip()
+                    self.samples.append({
+                        'image_path': image_path,
+                        'prompt': prompt,
+                        'output_dir': full_path
+                    })
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        image_tensor = preprocess_image(sample['image_path'])
+        return {
+            'image': image_tensor,
+            'prompt': sample['prompt'],
+            'output_dir': sample['output_dir'],
+            'image_path': sample['image_path']
+        }
+
+  
+                
+
+
+               
+        
+            

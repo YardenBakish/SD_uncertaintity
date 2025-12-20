@@ -1,6 +1,6 @@
 import torch
 #from diffusers import StableDiffusionPipeline
-
+from diffusers import DDIMScheduler
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from torchmetrics.multimodal import CLIPScore
 from PIL import Image
@@ -12,10 +12,13 @@ import os
 import torch.nn.functional as F
 from utils import *
 import matplotlib.pyplot as plt
+from config import set_config
+
+from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 
 import argparse
 
-NUM_SAMPLES_TO_GENERATE = 20
+NUM_SAMPLES_TO_GENERATE = 1000
 
 preprocess = transforms.Compose([
     transforms.Resize(224),
@@ -26,72 +29,97 @@ preprocess = transforms.Compose([
 
 def parse_args():
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'demo'])
+    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo'])
+    parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL'])
+
     parser.add_argument('--generation_method', type=str, default = 'basic', choices = ['basic'])
 
     args = parser.parse_args()
-    args.output_dir = f"uncertaintity_maps/{args.generation_method}"
+    args.output_dir = f"uncertaintity_maps/{args.model}/{args.generation_method}/"
+    args.output_dir_demo = f"uncertaintity_maps_demo/{args.model}"
     args.batch_size = 16
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir_demo, exist_ok=True)
+
     return args
 
 
+def deterministic(seed) -> None:
+    import numpy as np
+    if seed is None:
+        seed = 2024
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 
 def demo(args):
+    deterministic(2024)
+    
+    for start_idx in range(0, 8, args.batch_size):
+        dataset = load_dataset("jxie/flickr8k", split=f"validation[{start_idx}:{start_idx+args.batch_size}]", trust_remote_code=True)  # take 5 examples for demo
+        
+        
+        prompts = [item["caption_0"] for item in dataset]
+    
+        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
 
-    unet = UNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet",torch_dtype=torch.float16,)
-    scheduler =  PNDMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
-    # Load model (weights download automatically)
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16,
-        unet=unet,  
-        scheduler = scheduler,
-    ).to("cuda")
-
-
-    dataset = load_dataset("jxie/flickr8k", split="validation[:5]", trust_remote_code=True)  # take 5 examples for demo
-    prompts = [item["caption_0"] for item in dataset]
- 
-    output = pipe(prompts, apply_uc = True)
-
-    images = output[0].images
-    uncertainty_maps = output[1]
-
-    for idx in range(len(images)):
-        print(prompts[idx])
-        images[idx].save(f"output{idx}.jpg", quality=95)
+        images = output[0].images
+        uncertainty_maps = output[1]["uncertainty_maps"]
+        latents_lst = output[1]["latents_lst"]
+        
 
 
-    plot_uncertintiy_maps(
-        uncertainty_maps, 
-        images,
-        prompts,
-        out_dir = "uncertaintity_maps_demo",
-        target_size=128,
-        cmap="hot",
-        dpi=150)
+        for idx in range(len(images)):
+            print(prompts[idx])
+            images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}.jpg", quality=95)
 
+        
+        '''plot_uncertintiy_maps(
+            uncertainty_maps, 
+            images,
+            prompts,
+            out_dir = args.output_dir_demo,
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            dpi=150)'''
+        
+        plot_ASCD(
+            latents_lst, 
+            images,
+            prompts,
+            uncertainty_maps,
+            out_dir = f"{args.output_dir_demo}/ASCD",
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            dpi=150)
+
+        '''plot_ASCD(
+            latents_lst, 
+            images,
+            prompts,
+            uncertainty_maps,
+            out_dir = f"{args.output_dir_demo}/ASCD_OURS",
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            dpi=150,
+            ours = True)'''
+            
 
 
 
 def generate_uncertaintity_samples(args):
-
-    unet = UNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet",torch_dtype=torch.float16,)
-    scheduler =  PNDMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
-    # Load model (weights download automatically)
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16,
-        unet=unet,  
-        scheduler = scheduler,
-    ).to("cuda")
-
+    deterministic(2024)
+    
 
     dataset = load_dataset("jxie/flickr8k", split=f"validation[:{NUM_SAMPLES_TO_GENERATE}]", trust_remote_code=True) 
-
+    #print(dataset)
+    #exit(1)
     sample_idx = 0
     for batch_start in range(0, len(dataset), args.batch_size):
         batch_end = min(batch_start + args.batch_size, len(dataset))
@@ -107,13 +135,14 @@ def generate_uncertaintity_samples(args):
             prompts.append(shortest_caption)
         
        
-
         # Generate images
-        output = pipe(prompts, apply_uc=True, apply_uc_on_all_timesteps = True)
+        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
         images = output[0].images
-        uncertainty_maps = output[1]
+        uncertainty_maps = output[1]["uncertainty_maps"]
+        latents_lst = output[1]["latents_lst"]
         
         # Save each image with its prompt
+        sample_idx_copy = sample_idx
         for idx in range(len(images)):
             # Create subdirectory for this sample
             sample_dir = os.path.join(args.output_dir, str(sample_idx))
@@ -128,19 +157,91 @@ def generate_uncertaintity_samples(args):
             
             print(f"Sample {sample_idx}: {prompts[idx]}")
             sample_idx += 1
-        exit(1)
+
+        save_uncertainty_maps(
+            uncertainty_maps, 
+            sample_idx_copy,
+            latents_lst,
+            out_dir = args.output_dir,
+            cmap="hot",
+            dpi=150,
+        )
+        #exit(1)
     
 
 
+def collate_fn_heatmap_eval(batch):
+    image_paths = [item['image_path'] for item in batch]
+    images = torch.stack([item['image'] for item in batch])
+    prompts = [item['prompt'] for item in batch]
+    output_dirs = [item['output_dir'] for item in batch]
+    return images, prompts, output_dirs, image_paths 
 
+def generate_eval_heatmaps(args):
+    import numpy as np
+    model = RAHF()
+    ckpt_path = 'artifacts_heatmap_generator/RichHF/rahf_model.pt'
+    model.load_state_dict(torch.load(ckpt_path, map_location='cpu'))
+    model.eval()
+    
+    # Create dataset and dataloader
+    dataset = HeatmapEvalDataset(args.output_dir)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=8,  # Adjust based on your GPU memory
+        shuffle=False, 
+        num_workers=4,  # Adjust based on your CPU cores
+        collate_fn=collate_fn_heatmap_eval
+    )
+    
+    with torch.no_grad():
+        for images, prompts, output_dirs, image_paths in dataloader:
+            # Forward pass on batch
+            images = images.squeeze(1)
+            
+            out = model(images, prompts)
+            heatmaps_batch = out.pop('heatmaps')
+            
+            # Save results for each item in batch
+            for i, output_dir in enumerate(output_dirs):
+
+                fig, axes = plt.subplots(1, 2, figsize=(6 * 2, 5))
+                c = 0
+                for k in heatmaps_batch:
+                    # Extract i-th sample from batch
+                    heatmap = heatmaps_batch[k][i]
+                    torch.save(heatmap, f"{output_dir}/{k}.pt")
+
+                    orig_img = Image.open(image_paths[i]).convert("RGB")
+                    orig_np = np.array(orig_img)
+                    heat = heatmap.detach().cpu().squeeze().numpy()
+                    heat = np.array(Image.fromarray(heat).resize((512, 512), Image.BILINEAR))
+
+                    axes[c].imshow(orig_np)
+                    axes[c].imshow(heat, cmap="hot", alpha=0.5)
+                    axes[c].axis("off")
+                    axes[c].set_title(k, fontsize=12)
+                    c+=1
+
+                plt.tight_layout()
+                plt.savefig(f"{output_dir}/overlay.png", dpi=200)
+                plt.close()
+                print(output_dir)
+
+            
+            
+           
 
 if __name__ == "__main__":
     args          = parse_args()
+    set_config(args)
     if args.mode == "demo":
         demo(args)
     elif args.mode == "generate_uncertaintity_samples":
         generate_uncertaintity_samples(args)
-
+        #generate_eval_heatmaps(args)
+    elif args.mode == "generate_eval_heatmaps":
+        generate_eval_heatmaps(args)
 
 
 
