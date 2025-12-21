@@ -1089,14 +1089,15 @@ class StableDiffusionPipeline(
                     for layer_idx, grad in  enumerate(grads):
 
                         uncertainty = torch.abs(grad).max(dim=1, keepdim=True)[0]
-                        if uncertainty.shape[-2:] != 128:
-                            #print(height)
-                            uncertainty = torch.nn.functional.interpolate(
-                                uncertainty, size=128, mode='bilinear', align_corners=False
-                            )
-                        uncertainty_maps[t.item()][layer_idx] = uncertainty.detach().cpu()
                         
-
+                        #if uncertainty.shape[-2:] != 128:
+                        #    #print(height)
+                        #    uncertainty = torch.nn.functional.interpolate(
+                        #        uncertainty, size=128, mode='bilinear', align_corners=False
+                        #    )
+                        uncertainty_maps[t.item()][layer_idx] = uncertainty.detach().cpu()
+                
+                        
                 # predict the noise residual
                 with torch.no_grad():
                     noise_pred = self.unet(

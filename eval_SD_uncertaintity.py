@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 from config import set_config
 
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
-
 import argparse
 
 NUM_SAMPLES_TO_GENERATE = 1000
@@ -29,17 +28,23 @@ preprocess = transforms.Compose([
 
 def parse_args():
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo'])
+    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo', 'compare_methods'])
     parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL'])
+    parser.add_argument('--dataset', type=str, default = 'coco', choices = ['flickr8k', 'coco'])
+
 
     parser.add_argument('--generation_method', type=str, default = 'basic', choices = ['basic'])
 
     args = parser.parse_args()
-    args.output_dir = f"uncertaintity_maps/{args.model}/{args.generation_method}/"
+    args.output_dir = f"uncertaintity_maps/{args.model}/{args.generation_method}/{args.dataset}"
     args.output_dir_demo = f"uncertaintity_maps_demo/{args.model}"
+    args.output_dir_compare = f"uncertaintity_maps_compare/{args.model}"
+
     args.batch_size = 16
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.output_dir_demo, exist_ok=True)
+    os.makedirs(args.output_dir_compare, exist_ok=True)
+
 
     return args
 
@@ -111,30 +116,75 @@ def demo(args):
             ours = True)'''
             
 
+def compare_methods(args):
+    all_unmaps = []
+    all_latents = []
+
+    time_steps_sorted = []
+
+    # Iterate over subdirectories sorted numerically
+    subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
+                    key=lambda x: int(x))
+    subdirs = subdirs[:100]
+    for subdir in subdirs:
+       
+        subdir_path = os.path.join(args.output_dir, subdir)
+        
+        # Get all unmap files
+        unmap_files = [f for f in os.listdir(subdir_path) if f.endswith("_unmap.pt")]
+        # Sort descending by ts (numeric)
+        unmap_files.sort(key=lambda x: int(x.split("_")[0]), reverse=True)
+
+        time_steps_sorted = [elem.split("_")[0] for elem in  unmap_files]
+        
+        
+        # Load torch tensors
+        unmaps = [torch.load(os.path.join(subdir_path, f)) for f in unmap_files]
+        all_unmaps.append(unmaps)
+        
+        # Get all latent.py files
+        latent_files = [f for f in os.listdir(subdir_path) if f.endswith("_latent.py")]
+        latent_files.sort(key=lambda x: int(x.split("_")[0]), reverse=True)
+
+        latents = [torch.load(os.path.join(subdir_path, f)) for f in latent_files]
+        all_latents.append(unmaps)
+    
+    store_maps_for_methods((all_unmaps, all_latents), args.methods_eval)
+    
 
 
 def generate_uncertaintity_samples(args):
     deterministic(2024)
     
 
-    dataset = load_dataset("jxie/flickr8k", split=f"validation[:{NUM_SAMPLES_TO_GENERATE}]", trust_remote_code=True) 
-    #print(dataset)
-    #exit(1)
+    dataset = args.loaded_dataset #load_dataset("jxie/flickr8k", split=f"validation[:{NUM_SAMPLES_TO_GENERATE}]", trust_remote_code=True) 
+    
     sample_idx = 0
+    flag_cant_resume = True
     for batch_start in range(0, len(dataset), args.batch_size):
+        if flag_cant_resume:
+            output_dir_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size))
+            if os.path.isdir(output_dir_to_check):
+                sample_idx+= args.batch_size
+                continue 
+            else:
+                flag_cant_resume = False
         batch_end = min(batch_start + args.batch_size, len(dataset))
         batch_items = dataset[batch_start:batch_end]
         
         # Select shortest caption for each item in batch
         prompts = []
-        for i in range(len(batch_items['caption_0'])):
-            # Get all captions for this item
-            captions = [batch_items[f'caption_{j}'][i] for j in range(5) if f'caption_{j}' in batch_items]
-            # Select shortest
-            shortest_caption = min(captions, key=len)
-            prompts.append(shortest_caption)
-        
-       
+
+        if args.dataset == "flickr8k":
+            for i in range(len(batch_items['caption_0'])):
+                # Get all captions for this item
+                captions = [batch_items[f'caption_{j}'][i] for j in range(5) if f'caption_{j}' in batch_items]
+                # Select shortest
+                shortest_caption = min(captions, key=len)
+                prompts.append(shortest_caption)
+        elif args.dataset == "coco":
+            prompts = batch_items['caption']
+            
         # Generate images
         output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
         images = output[0].images
@@ -163,7 +213,7 @@ def generate_uncertaintity_samples(args):
             sample_idx_copy,
             latents_lst,
             out_dir = args.output_dir,
-            cmap="hot",
+            cmap    = "hot",
             dpi=150,
         )
         #exit(1)
@@ -234,7 +284,7 @@ def generate_eval_heatmaps(args):
 
 if __name__ == "__main__":
     args          = parse_args()
-    set_config(args)
+    set_config(args,gen_samples = (args.mode == "generate_uncertaintity_samples"))
     if args.mode == "demo":
         demo(args)
     elif args.mode == "generate_uncertaintity_samples":
@@ -242,7 +292,8 @@ if __name__ == "__main__":
         #generate_eval_heatmaps(args)
     elif args.mode == "generate_eval_heatmaps":
         generate_eval_heatmaps(args)
-
+    elif args.mode == "compare_methods":
+        compare_methods(args)
 
 
 '''

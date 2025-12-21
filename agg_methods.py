@@ -105,3 +105,87 @@ def get_artifact_mask(
         return expanded_mask
 
     return filtered_mask
+
+
+
+
+
+
+
+def otsu_threshold(img):
+    """
+    Compute Otsu's threshold for a 2D array.
+    """
+    # Flatten the image into 1D array
+    flat = img.flatten()
+    
+    # Get histogram
+    hist, bins = np.histogram(flat, bins=256, range=(0,1))
+    hist = hist.astype(float)
+    
+    # Get bin centers
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    
+    # Get total number of pixels
+    total = hist.sum()
+    
+    best_thresh = 0
+    best_variance = 0
+    
+    # Calculate cumulative sums
+    weight1 = np.cumsum(hist)
+    weight2 = np.cumsum(hist[::-1])[::-1]
+    
+    # Calculate cumulative means
+    mean1 = np.cumsum(hist * bin_centers) / weight1
+    mean2 = (np.cumsum((hist * bin_centers)[::-1]) / weight2[::-1])[::-1]
+    
+    # Calculate between class variance
+    variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+    
+    # Get threshold with maximum variance
+    idx = np.argmax(variance)
+    best_thresh = bin_centers[idx]
+    
+    return best_thresh
+
+
+
+def score_map(binary_map, value_map, score_type):
+    if score_type == "sum":
+        return value_map[binary_map].sum()
+    elif score_type == "count":
+        return binary_map.sum()
+    else:
+        raise ValueError(f"Unknown score_type: {score_type}")
+    
+
+
+local_methods = {
+    "single_t_10": lambda x: local_single_timestep(x, t=10),
+    "sum_all": lambda x: local_aggregate_all(x, agg="sum"),
+    "max_all": lambda x: local_aggregate_all(x, agg="max"),
+}
+
+
+def local_aggregate_all(latent_sample, agg="sum"):
+    stack = np.stack(latent_sample, axis=0)  # [T,H,W]
+    if agg == "sum":
+        return stack.sum(axis=0)
+    elif agg == "max":
+        return stack.max(axis=0)
+    else:
+        raise ValueError
+
+ 
+
+def generate_map_single_step(latents, method, methods_dict):
+
+    all_unmaps, all_latents =  x
+
+    
+    for idx, latent in enumerate(latents):
+        latent_step_t =  latent[step]
+
+
+

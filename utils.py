@@ -12,7 +12,7 @@ import os
 import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
-from agg_methods import get_artifact_mask, compute_frame_differences
+from agg_methods import get_artifact_mask, compute_frame_differences, generate_map_single_step
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 
 from torch.utils.data import Dataset, DataLoader
@@ -80,6 +80,8 @@ def simplify_uncertainty_maps(uncertainty_maps):
 
 
 
+
+
 def plot_ASCD(
     latents_lst, 
     images,
@@ -103,8 +105,6 @@ def plot_ASCD(
 
     sequence = latents_lst if ours is False else uncertainty_maps
 
-
-    
 
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
   
@@ -457,24 +457,29 @@ def save_uncertainty_maps(
         dpi=150,
     
     ):
-
+    
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
    
     example_ts = timesteps[0]
     last_layer = sorted(uncertainty_maps[example_ts].keys())[-1]
 
     num_samples = int(uncertainty_maps[example_ts][last_layer].shape[0] / 2)
-    print(len(latents_lst))
-    print(latents_lst[0].shape)
-    exit(1)
+    #print(len(latents_lst))
+    #print(latents_lst[0].shape)
+    #exit(1)
     for sample_idx in range(num_samples):
-        for map_idx in range(2):
+        for map_idx in range(1):
             for row_idx, ts in enumerate(timesteps):
                 uncertainty = uncertainty_maps[ts][last_layer].chunk(2)[map_idx][sample_idx].squeeze(0)
                 save_dir = f"{out_dir}/{sample_idx+sample_idx_copy}"
                 #os.makedirs(save_dir, exist_ok=True)
                 ext  = "uncond" if map_idx == 0 else "cond"
-                torch.save(uncertainty, f"{save_dir}/{ts}_{ext}.pt")
+                torch.save(uncertainty, f"{save_dir}/{ts}_unmap.pt")
+                
+
+                latent = latents_lst[row_idx][sample_idx]
+                torch.save(latent, f"{save_dir}/{ts}_latent.pt")
+
                 
                 '''
                 plt.imshow(uncertainty, cmap='hot')  # cmap can be 'hot', 'viridis', etc.
@@ -521,9 +526,58 @@ class HeatmapEvalDataset(Dataset):
         }
 
   
-                
 
 
-               
-        
+
+
+def store_maps_for_methods(x, methods_dict):
+
+    for method in methods_dict["methods"]:
+        final_method = ""
+
+        if methods_dict["methods"][method]:
+            if "ASCED" not in method:
+                method_name = "basic"
+                for agg_calculation in methods_dict["agg_calculation"]:
+                    semi_final_method = f"{method_name}_{agg_calculation}_{method}"
+                   
+                    if method == "per_timestep":     
+                        for timestep in methods_dict["timesteps_basic"]:
+                            final_method = f"{semi_final_method}_{timestep}"
+                    else:
+                        final_method = semi_final_method
+                        print(final_method)
+            else:
+                pass
+
             
+            
+            
+        #maps = generate_map_single_step(x)
+
+
+
+
+'''
+In general - we determine global uncertaintity by:
+(1) sum over uncertaintity map
+(2) number of pixels above threshold
+
+All possible methods:
+(single)
+(1) above otsu / median for some single step
+(2) above otsu / median for the one with the max value of uncertaintity
+(3) above otsu / median for the one with the max(sum) value of uncertaintity
+(4) the one with most pixels, above otsu / median after we normalize (or without)
+(5) Unite over timsteps [i,j]
+(6) max over steps [i,j] and take above some threshold
+
+------------------------
+(acceleration) - need to try on multiple start-end and multiple MAD values
+(1) max difference (for any pixel) between consequetive
+(2) some specific step
+(3) max difference in terms of sum
+(4) 
+
+
+'''

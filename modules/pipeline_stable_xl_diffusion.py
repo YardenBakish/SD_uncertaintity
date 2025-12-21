@@ -1252,13 +1252,19 @@ class StableDiffusionXLPipeline(
                         
 
                         uncertainty = torch.abs(grad).max(dim=1, keepdim=True)[0]
-                        if uncertainty.shape[-2:] != 128:
-                            #print(height)
-                            uncertainty = torch.nn.functional.interpolate(
-                                uncertainty, size=128, mode='bilinear', align_corners=False
-                            )
+                        
+                        #if uncertainty.shape[-2:] != 128:
+                        #    #print(height)
+                        #    uncertainty = torch.nn.functional.interpolate(
+                        #        uncertainty, size=128, mode='bilinear', align_corners=False
+                        #    )
                         uncertainty_maps[t.item()][layer_idx] = uncertainty.detach().cpu()
-          
+                    
+
+                #torch.Size([4, 1, 64, 64])
+                #torch.Size([4, 1, 128, 128])
+                #torch.Size([4, 1, 128, 128])
+                #torch.Size([4, 1, 128, 128])
 
                 with torch.no_grad():
                     noise_pred = self.unet(
