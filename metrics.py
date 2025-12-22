@@ -1,4 +1,4 @@
-'''import argparse
+import argparse
 from cleanfid.cleanfid import fid as cfid
 from pathlib import Path
 import os
@@ -30,14 +30,32 @@ def compute_fid(dir_fake, dir_real, batch_size=256, num_workers=4):
     )
     return score
 
+
+def compute_fid_custom(dir_fake, dir_real, batch_size=256, num_workers=4, file_indices = None):
+    
+
+    score = fid.compute_fid(
+        dir_fake,
+        dir_real,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        mode="clean",
+        model_name="inception_v3",
+        file_indices = file_indices
+        
+    )
+    return score
+
+
+'''
 if __name__ == "__main__":
-    fake_dir = "datasets/coco/val2014"
+    fake_dir = "uncertaintity_maps/1.5v/basic/coco"
     real_dir = "datasets/coco/val2014"
 
     fid_score = compute_fid(fake_dir, real_dir)
     print(f"FID: {fid_score:.4f}")'''
 
-
+'''
 
 import os
 import torch
@@ -145,3 +163,4 @@ def compute_pr(opts, max_real, num_gen, nhood_size, row_batch_size, col_batch_si
             pred.append((dist <= kth).any(dim=1) if opts.rank == 0 else None)
         results[name] = float(torch.cat(pred).to(torch.float32).mean() if opts.rank == 0 else 'nan')
     return results['precision'], results['recall']
+    '''

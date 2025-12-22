@@ -6,15 +6,27 @@ from torchvision import transforms
 from torchvision.models import inception_v3
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+from glob import glob
 
 
 class ImageFolderDataset(Dataset):
     """Simple dataset that loads images from a folder"""
-    def __init__(self, folder_path, transform=None):
+    def __init__(self, folder_path, transform=None, file_indices = None):
         self.folder_path = folder_path
         self.transform = transform
         self.image_files = [f for f in os.listdir(folder_path) 
                            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+  
+        if len(self.image_files)  == 0:
+            self.image_files = [
+                file for file in glob(os.path.join(folder_path, f"**/*/*.jpg"), recursive=True)
+            ]
+
+        if file_indices:
+            pref = "/".join(self.image_files[0].split("/")[:-2])
+            suff = self.image_files[0].split("/")[-1]
+            self.image_files = [f"{pref}/{elem}/{suff}" for elem in file_indices]
+        
         
     def __len__(self):
         return len(self.image_files)
@@ -36,7 +48,7 @@ def get_inception_model(device):
     return model
 
 
-def extract_features(image_folder, model, device, batch_size=32):
+def extract_features(image_folder, model, device, batch_size=32, extract_features = None, file_indices =None):
     """Extract Inception features from all images in a folder"""
     transform = transforms.Compose([
         transforms.Resize(299),
@@ -45,7 +57,7 @@ def extract_features(image_folder, model, device, batch_size=32):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    dataset = ImageFolderDataset(image_folder, transform=transform)
+    dataset = ImageFolderDataset(image_folder, transform=transform, file_indices=file_indices)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
                            num_workers=4, pin_memory=True)
     
@@ -111,7 +123,7 @@ def compute_precision_recall(real_features, gen_features, nhood_size=3):
     return precision, recall
 
 
-def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, device=None):
+def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, device=None, file_indices = None):
     """
     Main function to calculate precision and recall
     
@@ -136,10 +148,11 @@ def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, devi
     
     # Extract features
     print(f"\nExtracting features from real images in: {real_folder}")
-    real_features = extract_features(real_folder, model, device, batch_size)
+
+    real_features = extract_features(real_folder, model, device, batch_size) #real_folder
     
     print(f"\nExtracting features from generated images in: {gen_folder}")
-    gen_features = extract_features(gen_folder, model, device, batch_size)
+    gen_features = extract_features(gen_folder, model, device, batch_size, file_indices=file_indices)
     
     # Compute metrics
     precision, recall = compute_precision_recall(real_features, gen_features, nhood_size)
@@ -149,7 +162,7 @@ def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, devi
         'recall': recall
     }
 
-
+'''
 if __name__ == "__main__":
     # Example usage
     real_folder = "datasets/coco/val2014"
@@ -167,4 +180,4 @@ if __name__ == "__main__":
     print("="*50)
     print(f"Precision: {results['precision']:.4f}")
     print(f"Recall: {results['recall']:.4f}")
-    print(f"F1 Score: {2 * results['precision'] * results['recall'] / (results['precision'] + results['recall']):.4f}")
+    print(f"F1 Score: {2 * results['precision'] * results['recall'] / (results['precision'] + results['recall']):.4f}")'''

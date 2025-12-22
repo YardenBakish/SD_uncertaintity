@@ -10,7 +10,9 @@ from modules.scheduling_pndm import PNDMScheduler
 from torchvision import transforms
 import os
 import torch.nn.functional as F
+from eval_utils import *
 from utils import *
+
 import matplotlib.pyplot as plt
 from config import set_config
 
@@ -28,22 +30,43 @@ preprocess = transforms.Compose([
 
 def parse_args():
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo', 'compare_methods'])
+    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo', 'compare_methods', 'analyze_compare_methods'])
     parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL'])
-    parser.add_argument('--dataset', type=str, default = 'coco', choices = ['flickr8k', 'coco'])
 
+
+    parser.add_argument('--resize_fid', type=int, default = 299, choices = [299, 512, 1024])
+    parser.add_argument('--compare_mode', type=str, default = "fid_filter_high", choices = ["fid_filter_high"])
+    parser.add_argument('--compare_vis', action='store_true')
+    
+
+
+    parser.add_argument('--dataset', type=str, default = 'coco', choices = ['flickr8k', 'coco'])
+    
 
     parser.add_argument('--generation_method', type=str, default = 'basic', choices = ['basic'])
+
+    
 
     args = parser.parse_args()
     args.output_dir = f"uncertaintity_maps/{args.model}/{args.generation_method}/{args.dataset}"
     args.output_dir_demo = f"uncertaintity_maps_demo/{args.model}"
-    args.output_dir_compare = f"uncertaintity_maps_compare/{args.model}"
+    args.output_dir_compare = f"uncertaintity_maps_compare/{args.dataset}/{args.model}/{args.compare_mode}/{args.resize_fid}"
+
+    args.output_vis_dir_compare = f"visualizations/compare/{args.dataset}/{args.model}/"
+
+
+
+
+
+    if args.dataset == "coco":
+        args.real_dataset_dir = "datasets/coco/val2014"
 
     args.batch_size = 16
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.output_dir_demo, exist_ok=True)
     os.makedirs(args.output_dir_compare, exist_ok=True)
+    os.makedirs(args.output_vis_dir_compare, exist_ok=True)
+
 
 
     return args
@@ -63,7 +86,7 @@ def deterministic(seed) -> None:
 def demo(args):
     deterministic(2024)
     
-    for start_idx in range(0, 8, args.batch_size):
+    for start_idx in range(0, 16, args.batch_size):
         dataset = load_dataset("jxie/flickr8k", split=f"validation[{start_idx}:{start_idx+args.batch_size}]", trust_remote_code=True)  # take 5 examples for demo
         
         
@@ -82,7 +105,7 @@ def demo(args):
             images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}.jpg", quality=95)
 
         
-        '''plot_uncertintiy_maps(
+        plot_uncertintiy_maps(
             uncertainty_maps, 
             images,
             prompts,
@@ -90,9 +113,9 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
-            dpi=150)'''
+            dpi=150)
         
-        plot_ASCD(
+        '''plot_ASCD(
             latents_lst, 
             images,
             prompts,
@@ -101,7 +124,7 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
-            dpi=150)
+            dpi=150)'''
 
         '''plot_ASCD(
             latents_lst, 
@@ -116,12 +139,16 @@ def demo(args):
             ours = True)'''
             
 
+
+
+
+
+
 def compare_methods(args):
     all_unmaps = []
     all_latents = []
 
     time_steps_sorted = []
-
     # Iterate over subdirectories sorted numerically
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
@@ -129,14 +156,12 @@ def compare_methods(args):
     for subdir in subdirs:
        
         subdir_path = os.path.join(args.output_dir, subdir)
-        
         # Get all unmap files
         unmap_files = [f for f in os.listdir(subdir_path) if f.endswith("_unmap.pt")]
         # Sort descending by ts (numeric)
         unmap_files.sort(key=lambda x: int(x.split("_")[0]), reverse=True)
 
-        time_steps_sorted = [elem.split("_")[0] for elem in  unmap_files]
-        
+        time_steps_sorted = [int(elem.split("_")[0]) for elem in  unmap_files]
         
         # Load torch tensors
         unmaps = [torch.load(os.path.join(subdir_path, f)) for f in unmap_files]
@@ -149,9 +174,40 @@ def compare_methods(args):
         latents = [torch.load(os.path.join(subdir_path, f)) for f in latent_files]
         all_latents.append(unmaps)
     
-    store_maps_for_methods((all_unmaps, all_latents), args.methods_eval)
+    dirs_dict = {
+        "output_dir_compare" : args.output_dir_compare,
+        "real_dataset_dir": args.real_dataset_dir,
+        "fake_dataset_dir": args.output_dir,
+        "compare_vis_dir": args.output_vis_dir_compare
+
+    }
+    if args.compare_vis:
+        vis_metrics_for_methods((all_unmaps, all_latents, time_steps_sorted), 
+                                args.methods_eval, 
+                                compare_mode = args.compare_mode, 
+                                dirs_dict   = dirs_dict ,
+                                resize_fid   = args.resize_fid,
+                                )
+
+
+    else:
+        eval_metrics_for_methods((all_unmaps, all_latents, time_steps_sorted), 
+                                    args.methods_eval, 
+                                    compare_mode = args.compare_mode, 
+                                    dirs_dict   = dirs_dict ,
+                                    resize_fid   = args.resize_fid,
+                                    )
     
 
+
+
+
+def analyze_compare_methods(args):
+    collect_and_merge_results(args.output_dir_compare)
+    print(args.output_dir_compare)
+    exit(1)
+
+    
 
 def generate_uncertaintity_samples(args):
     deterministic(2024)
@@ -294,7 +350,8 @@ if __name__ == "__main__":
         generate_eval_heatmaps(args)
     elif args.mode == "compare_methods":
         compare_methods(args)
-
+    elif args.mode == "analyze_compare_methods":
+        analyze_compare_methods(args)
 
 '''
 # Convert PIL images to tensors for CLIPScore

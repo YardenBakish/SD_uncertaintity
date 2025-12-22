@@ -10,12 +10,14 @@ from modules.scheduling_pndm import PNDMScheduler
 from torchvision import transforms
 import os
 import torch.nn.functional as F
-
+from metrics import compute_fid_custom
+from metrics2 import calculate_metrics
 import matplotlib.pyplot as plt
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
-
+import json
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from utils import *
 
 from scipy.ndimage import (
     binary_erosion,
@@ -151,41 +153,124 @@ def otsu_threshold(img):
 
 
 
-def score_map(binary_map, value_map, score_type):
-    if score_type == "sum":
-        return value_map[binary_map].sum()
-    elif score_type == "count":
-        return binary_map.sum()
-    else:
-        raise ValueError(f"Unknown score_type: {score_type}")
-    
-
-
-local_methods = {
-    "single_t_10": lambda x: local_single_timestep(x, t=10),
-    "sum_all": lambda x: local_aggregate_all(x, agg="sum"),
-    "max_all": lambda x: local_aggregate_all(x, agg="max"),
-}
-
-
-def local_aggregate_all(latent_sample, agg="sum"):
-    stack = np.stack(latent_sample, axis=0)  # [T,H,W]
-    if agg == "sum":
-        return stack.sum(axis=0)
-    elif agg == "max":
-        return stack.max(axis=0)
-    else:
-        raise ValueError
 
  
+def generate_single_map(latents_sample, agg_type, timestep_index):
+    latent = latents_sample[timestep_index]
+   
+    if agg_type == "sum":
+        return latent.sum(), None
+    elif agg_type == "max":
+        return latent.max(), None
+    elif agg_type == "aboveAvg":
+        latent = (latent - latent.min()) / (latent.max() - latent.min())
+        bin_map =  latent > latent.mean()
+        res = (bin_map).sum()
+        return res, bin_map
+    elif agg_type == "aboveOtsu":
+        latent = (latent - latent.min()) / (latent.max() - latent.min())
+        thr = otsu_threshold(latent.cpu().detach().numpy())
+        bin_map = latent > thr
+        return (bin_map).sum(), bin_map
 
-def generate_map_single_step(latents, method, methods_dict):
 
-    all_unmaps, all_latents =  x
 
+
+
+
+def generate_map_wrapper(x, method, methods_dict, dirs_dict, compare_mode=False, resize_fid=None, vis = False):
+
+    output_dir = dirs_dict["output_dir_compare"]
+    final_output_dir = f"{output_dir}/{method}"
+    real_dataset_dir = dirs_dict["real_dataset_dir"]
+    fake_dataset_dir = dirs_dict["fake_dataset_dir"]
+
+    #print(final_output_dir)
+    #exit(1)
+
+    all_unmaps, all_latents, time_steps_sorted =  x
+    method_sep = method.split("_")
+    agg_type = method_sep[1]
+    type_method = method_sep[0]
+    reps = all_unmaps if "latent" in method else all_latents
+
+    uncertaintity_maps_dict = {}
+    uncertaintity_maps = {}
+    uncertaintity_maps_bin = {}
+
+    for sample_idx, latents_sample in enumerate(reps):
+        if type_method == "basic" and "perTimestep" in method:
+            timestep = int(method_sep[-1])
+            timestep_index = time_steps_sorted.index(timestep)
+            latent_sample_timestep  = latents_sample[timestep_index]
+            uncertaintity_maps[sample_idx] = latent_sample_timestep
+            
+            tmp_res = generate_single_map(latents_sample, agg_type, timestep_index)
+
+            uncertaintity_maps_dict[sample_idx] = tmp_res[0]  #score 
+            uncertaintity_maps_bin[sample_idx] = tmp_res[1]
+        
+        elif type_method == "basic" and "globalTimestep" in method:
+            print("NOT IMPLEMENTED")
+            exit(1)
+            
+    d = {}
+    if compare_mode == "fid_filter_high":
+        file_ids = sorted(uncertaintity_maps_dict.items(), key=lambda x: x[1], reverse=True)
+        file_ids = [elem[0] for elem in file_ids]
+        len_file_ids = len(file_ids)
+        file_ids_84 = file_ids[int(0.16 * len_file_ids ):]
+      
+        fid_res = compute_fid_custom(fake_dataset_dir, real_dataset_dir, file_indices = file_ids_84)
+        
+
+        d["fid"] = fid_res
+        update_json(f"{final_output_dir}/res.json", d)
+        
+   
+        
+      
+        '''prec_rec_res = calculate_metrics(
+            real_folder=real_dataset_dir,
+            gen_folder=fake_dataset_dir,
+            nhood_size=3,
+            batch_size=32,
+            file_indices = file_ids_84
+        )
+
+        precision = prec_rec_res["precision"]
+        recall = prec_rec_res["recall"]'''
+
+
+    return {'uncertaintity_maps_dict': uncertaintity_maps_dict,
+            'uncertaintity_maps': uncertaintity_maps,
+            'uncertaintity_maps_bin': uncertaintity_maps_bin
+            }
+
+        
+        
+        
     
-    for idx, latent in enumerate(latents):
-        latent_step_t =  latent[step]
+    
+    
+    
+    '''
+    for k, v in sorted(uncertaintity_maps.items(), key=lambda x: x[1], reverse=True):
+         print(f"{k}: {v}")
+
+    print(output_dir)
+    exit(1)'''
+
+
+
+
+ 
+   
+
+
+
+
+
 
 
 
