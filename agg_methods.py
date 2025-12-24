@@ -67,7 +67,7 @@ def get_artifact_mask(
         median = np.median(diff)
         mad = np.median(np.abs(diff - median))
         threshold = median + mad_scale * 1.4826 * mad
-
+        
         diff_max = np.max(diff, axis=2) if diff.ndim == 3 else diff
        
         artifact_mask |= diff_max > threshold
@@ -175,10 +175,48 @@ def generate_single_map(latents_sample, agg_type, timestep_index):
 
 
 
+def generate_single_map_global_method(latents_sample, agg_type):
+    
+    parts = agg_type.split('$')
+    reduce_op, select_op = parts[0], parts[1]
+    
+    if 'Over' in reduce_op:
+        # Aggregate across all maps
+        if reduce_op == 'sumOver':
+            result_map = torch.stack(latents_sample).sum(dim=0)
+        else:  # maxOver
+            result_map = torch.stack(latents_sample).max(dim=0)[0]
+        
+        score = result_map.sum().item()
+        return score, result_map
+    
+    else:
+        # Reduce each map to scalar, then select
+        if reduce_op == 'sumEach':
+            scores = [m.sum().item() for m in latents_sample]
+        else:  # maxEach
+            scores = [m.max().item() for m in latents_sample]
+        
+        best_idx = scores.index(max(scores))
+        best_map = latents_sample[best_idx]
+        
+        if select_op == 'max':
+            return scores[best_idx], best_map
+        else:  # otsu
+            threshold = otsu_threshold(best_map)  # Your external function
+            score = (best_map > threshold).sum().item()
+            return score, best_map
 
 
 
-def generate_map_wrapper(x, method, methods_dict, dirs_dict, compare_mode=False, resize_fid=None, vis = False):
+def generate_map_wrapper(x, method, methods_dict, dirs_dict, 
+                        compare_mode=False, 
+                        resize_fid=None, 
+                        vis = False,
+                        start_timestep = None,
+                        end_timestep = None,
+
+                        ):
 
     output_dir = dirs_dict["output_dir_compare"]
     final_output_dir = f"{output_dir}/{method}"
@@ -189,30 +227,51 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict, compare_mode=False,
     #exit(1)
 
     all_unmaps, all_latents, time_steps_sorted =  x
+
+    if end_timestep:
+        time_steps_sorted = time_steps_sorted[:end_timestep]
+        all_unmaps = [e[:end_timestep] for e in all_unmaps]
+        all_latents = [e[:end_timestep] for e in all_latents]
+
+    if start_timestep:
+        time_steps_sorted = time_steps_sorted[start_timestep:]
+        all_unmaps = [e[start_timestep:] for e in all_unmaps]
+        all_latents = [e[start_timestep:] for e in all_latents]
+
+
     method_sep = method.split("_")
     agg_type = method_sep[1]
     type_method = method_sep[0]
     reps = all_unmaps if "latent" in method else all_latents
 
+    
+
     uncertaintity_maps_dict = {}
     uncertaintity_maps = {}
     uncertaintity_maps_bin = {}
 
-    for sample_idx, latents_sample in enumerate(reps):
+    for sample_idx, latents_sample in enumerate(reps): # 300000 times
+        print(f"{sample_idx}/ {len(reps)}")
+        reps_loaded = [torch.load(filepath) for filepath in latents_sample]
         if type_method == "basic" and "perTimestep" in method:
             timestep = int(method_sep[-1])
             timestep_index = time_steps_sorted.index(timestep)
-            latent_sample_timestep  = latents_sample[timestep_index]
+            latent_sample_timestep  = reps_loaded[timestep_index]
             uncertaintity_maps[sample_idx] = latent_sample_timestep
             
-            tmp_res = generate_single_map(latents_sample, agg_type, timestep_index)
+            tmp_res = generate_single_map(reps_loaded, agg_type, timestep_index)
 
             uncertaintity_maps_dict[sample_idx] = tmp_res[0]  #score 
-            uncertaintity_maps_bin[sample_idx] = tmp_res[1]
+            if vis:
+                uncertaintity_maps_bin[sample_idx] = tmp_res[1]
         
         elif type_method == "basic" and "globalTimestep" in method:
-            print("NOT IMPLEMENTED")
-            exit(1)
+            tmp_res = generate_single_map_global_method(reps_loaded, agg_type)
+            uncertaintity_maps_dict[sample_idx] = tmp_res[0]  #score 
+            if vis:
+                uncertaintity_maps[sample_idx] = tmp_res[1]
+
+             
             
     d = {}
     if compare_mode == "fid_filter_high":
@@ -227,7 +286,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict, compare_mode=False,
         d["fid"] = fid_res
         update_json(f"{final_output_dir}/res.json", d)
         
-   
+        exit(1)
         
       
         '''prec_rec_res = calculate_metrics(

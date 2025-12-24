@@ -113,6 +113,7 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
+            culumative = False,
             dpi=150)
         
         '''plot_ASCD(
@@ -152,10 +153,12 @@ def compare_methods(args):
     # Iterate over subdirectories sorted numerically
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
-    subdirs = subdirs[:100]
-    for subdir in subdirs:
-       
+    #subdirs = subdirs[:250]
+    images_path = []
+    for idx, subdir in enumerate(subdirs):
+
         subdir_path = os.path.join(args.output_dir, subdir)
+        images_path.append(f"{subdir_path}/output.jpg")
         # Get all unmap files
         unmap_files = [f for f in os.listdir(subdir_path) if f.endswith("_unmap.pt")]
         # Sort descending by ts (numeric)
@@ -164,14 +167,14 @@ def compare_methods(args):
         time_steps_sorted = [int(elem.split("_")[0]) for elem in  unmap_files]
         
         # Load torch tensors
-        unmaps = [torch.load(os.path.join(subdir_path, f)) for f in unmap_files]
+        unmaps = [os.path.join(subdir_path, f) for f in unmap_files]
         all_unmaps.append(unmaps)
         
         # Get all latent.py files
         latent_files = [f for f in os.listdir(subdir_path) if f.endswith("_latent.py")]
         latent_files.sort(key=lambda x: int(x.split("_")[0]), reverse=True)
 
-        latents = [torch.load(os.path.join(subdir_path, f)) for f in latent_files]
+        latents = [os.path.join(subdir_path, f) for f in latent_files]
         all_latents.append(unmaps)
     
     dirs_dict = {
@@ -181,12 +184,14 @@ def compare_methods(args):
         "compare_vis_dir": args.output_vis_dir_compare
 
     }
+    
     if args.compare_vis:
         vis_metrics_for_methods((all_unmaps, all_latents, time_steps_sorted), 
                                 args.methods_eval, 
                                 compare_mode = args.compare_mode, 
                                 dirs_dict   = dirs_dict ,
                                 resize_fid   = args.resize_fid,
+                                images_path = images_path
                                 )
 
 

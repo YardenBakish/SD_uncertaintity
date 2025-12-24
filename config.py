@@ -24,6 +24,7 @@ import json
 METHODS_EVAL = {
     "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41'],
     "agg_calculation": ["sum", "max", "aboveAvg", "aboveOtsu"], 
+    'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu" "sumOver$sum", "maxOver$sum"],
     "MAD_values" : [],
     
     "methods": {
@@ -36,7 +37,6 @@ METHODS_EVAL = {
         "ASCED_ours_per_timestep_jump_two": False,
         "ASCED_latent_per_timestep": False
        
-        
     }
 }
 
