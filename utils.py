@@ -59,3 +59,20 @@ def collect_and_merge_results(root_dir):
         
         if os.path.isdir(subdir):
             shutil.rmtree(subdir)
+
+
+
+
+
+def print_stats(root_dir):
+    root_dir = os.path.abspath(root_dir)
+    global_res_path = os.path.join(root_dir, "res.json")
+    with open(global_res_path, "r") as f:
+        data = json.load(f)
+
+    # Sort methods by descending FID
+    sorted_methods = sorted(data.items(), key=lambda x: x[1]["fid"], reverse=False)
+
+    # Print each method in order
+    for method, metrics in sorted_methods:
+        print(method, metrics["fid"])

@@ -12,7 +12,8 @@ import os
 import torch.nn.functional as F
 import json
 import matplotlib.pyplot as plt
-from agg_methods import get_artifact_mask, compute_frame_differences, generate_map_wrapper
+from agg_methods import get_artifact_mask, compute_frame_differences
+from agg_experiments import generate_map_wrapper
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 from diffusers import DDIMScheduler
 
@@ -96,7 +97,7 @@ def plot_ASCD(
 
 
     start_timestep = 12# 12
-    end_timestep   = -3 if ours is False else -3
+    end_timestep   = 32 if ours is False else 32
     os.makedirs(out_dir, exist_ok=True)
 
    
@@ -104,7 +105,7 @@ def plot_ASCD(
 
     sequence = latents_lst if ours is False else uncertainty_maps
 
-
+    
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
   
     sequence_len = latents_lst[0].shape[0] if ours is False else sequence[timesteps[0]].shape[0]
@@ -112,6 +113,7 @@ def plot_ASCD(
     for sample_id in range(sequence_len):
         if ours is False:
             image_sequence = [np.array(latent[sample_id].cpu()).transpose(1, 2, 0) for latent in sequence]
+            
         else:
             image_sequence = [np.array(sequence[ts][sample_id].cpu()).transpose(1, 2, 0) for ts in sequence]
 
@@ -560,7 +562,12 @@ class HeatmapEvalDataset(Dataset):
   
 
 def check_results_exists(output_dir, method):
+
+    
     global_file = f"{output_dir}/res.json"
+    local_dir = f"{output_dir}/{method}"
+    
+
     if os.path.isfile(global_file):
         with open(global_file) as f:
             data = json.load(f)
@@ -568,7 +575,6 @@ def check_results_exists(output_dir, method):
                 print(f"Results for {method} were found! (global)")
                 return True
     else:
-        local_dir = f"{output_dir}/{method}"
         local_file = f"{local_dir}/res.json"
         if os.path.isfile(local_file):
             with open(local_file) as f:
@@ -792,7 +798,29 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                         if check_results_exists(output_dir, final_method) == False:
                             generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid =resize_fid)
             else:
-                pass
+                method_name = "ASCED"
+                agg_types = methods_dict["agg_ASCED_calculation"]
+                MAD_start_indices = methods_dict["MAD_start_indices"]
+                MAD_end_indices = methods_dict["MAD_end_indices"]
+                MAD_values = methods_dict["MAD_values"]
+
+
+                for agg_calculation in agg_types:
+                    for start_idx in MAD_start_indices:
+                        for end_idx in MAD_end_indices:
+                            for mad_value in MAD_values:
+                                final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}${mad_value}"
+                                
+                                if check_results_exists(output_dir, final_method) == False:
+                                    generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
+                                                            compare_mode = compare_mode, 
+                                                            resize_fid =resize_fid,
+                                                            start_timestep = start_idx,
+                                                            end_timestep = end_idx,
+                                                            mad_value = mad_value,
+                                                            asced = True)
+
+                
 
             
             

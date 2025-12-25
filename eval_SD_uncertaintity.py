@@ -44,6 +44,10 @@ def parse_args():
     
 
     parser.add_argument('--generation_method', type=str, default = 'basic', choices = ['basic'])
+    parser.add_argument('--agg_method', type=str, choices = ["sum", "max", "aboveAvg", "aboveOtsu"])
+    parser.add_argument('--agg_MAD_method', type=str, choices = ["sum", "max", "count"])
+
+
 
     
 
@@ -105,7 +109,7 @@ def demo(args):
             images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}.jpg", quality=95)
 
         
-        plot_uncertintiy_maps(
+        '''plot_uncertintiy_maps(
             uncertainty_maps, 
             images,
             prompts,
@@ -114,7 +118,7 @@ def demo(args):
             cmap="hot",
             start_idx = start_idx,
             culumative = False,
-            dpi=150)
+            dpi=150)'''
         
         '''plot_ASCD(
             latents_lst, 
@@ -127,7 +131,7 @@ def demo(args):
             start_idx = start_idx,
             dpi=150)'''
 
-        '''plot_ASCD(
+        plot_ASCD(
             latents_lst, 
             images,
             prompts,
@@ -137,7 +141,7 @@ def demo(args):
             cmap="hot",
             start_idx = start_idx,
             dpi=150,
-            ours = True)'''
+            ours = True)
             
 
 
@@ -153,7 +157,7 @@ def compare_methods(args):
     # Iterate over subdirectories sorted numerically
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
-    #subdirs = subdirs[:250]
+    subdirs = subdirs[:10000]
     images_path = []
     for idx, subdir in enumerate(subdirs):
 
@@ -171,11 +175,12 @@ def compare_methods(args):
         all_unmaps.append(unmaps)
         
         # Get all latent.py files
-        latent_files = [f for f in os.listdir(subdir_path) if f.endswith("_latent.py")]
+        latent_files = [f for f in os.listdir(subdir_path) if f.endswith("_latent.pt")]
         latent_files.sort(key=lambda x: int(x.split("_")[0]), reverse=True)
 
         latents = [os.path.join(subdir_path, f) for f in latent_files]
-        all_latents.append(unmaps)
+        all_latents.append(latents)
+    
     
     dirs_dict = {
         "output_dir_compare" : args.output_dir_compare,
@@ -209,7 +214,7 @@ def compare_methods(args):
 
 def analyze_compare_methods(args):
     collect_and_merge_results(args.output_dir_compare)
-    print(args.output_dir_compare)
+    print_stats(args.output_dir_compare)
     exit(1)
 
     

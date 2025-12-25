@@ -32,7 +32,12 @@ class ImageFolderDataset(Dataset):
         return len(self.image_files)
     
     def __getitem__(self, idx):
-        img_path = os.path.join(self.folder_path, self.image_files[idx])
+        if "/" not in self.image_files[idx]:
+            img_path = os.path.join(self.folder_path, self.image_files[idx])
+        else:
+            img_path = self.image_files[idx]
+        print(self.folder_path)
+        print(self.image_files[idx])
         image = Image.open(img_path).convert('RGB')
         if self.transform:
             image = self.transform(image)

@@ -284,9 +284,11 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
         
 
         d["fid"] = fid_res
-        update_json(f"{final_output_dir}/res.json", d)
+        print(fid_res)
         
-        exit(1)
+        update_json(f"{final_output_dir}/res2.json", d)
+        
+        
         
       
         '''prec_rec_res = calculate_metrics(
@@ -297,8 +299,11 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
             file_indices = file_ids_84
         )
 
-        precision = prec_rec_res["precision"]
-        recall = prec_rec_res["recall"]'''
+        d["precision"] = prec_rec_res["precision"]
+        d["recall"] = prec_rec_res["recall"]
+
+        update_json(f"{final_output_dir}/res.json", d)'''
+
 
 
     return {'uncertaintity_maps_dict': uncertaintity_maps_dict,

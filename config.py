@@ -22,20 +22,25 @@ import json
 
 
 METHODS_EVAL = {
-    "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41'],
-    "agg_calculation": ["sum", "max", "aboveAvg", "aboveOtsu"], 
-    'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu" "sumOver$sum", "maxOver$sum"],
-    "MAD_values" : [],
+    "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41' ], #
+    "agg_calculation": ["sum", "max", "aboveAvg", "aboveOtsu"], #
+    'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu", "sumOver$sum", "maxOver$sum"],
+    "agg_ASCED_calculation": ["sum", "max", "count"], #
+
+    "MAD_values" : [3,6,10,], #1, 12
+    "MAD_start_indices": [10, 12, 14, 20] ,
+
+    "MAD_end_indices": [24, 27, 30,] , # 32, 40
     
     "methods": {
 
-        "perTimestep": True,
+        "perTimestep": False,
         "globalTimestep": False,
 
 
-        "ASCED_ours_per_timestep": False,
-        "ASCED_ours_per_timestep_jump_two": False,
-        "ASCED_latent_per_timestep": False
+        "ASCEDOurs": False,
+        
+        "ASCEDLatent": True
        
     }
 }
@@ -95,6 +100,18 @@ def set_config(args, gen_samples = False):
 
     if args.mode == "compare_methods":
         args.methods_eval = METHODS_EVAL
+
+        args.methods_eval["timesteps_basic"] = args.methods_eval["timesteps_basic"][::2]
+        if '441' not in args.methods_eval["timesteps_basic"]:
+            args.methods_eval["timesteps_basic"].append('441')
+
+        if args.agg_method:
+            args.methods_eval["agg_calculation"] =  [args.agg_method] 
+  
+
+        if args.agg_MAD_method:
+            args.methods_eval["agg_ASCED_calculation"] =  [args.agg_MAD_method] 
+
 
         #print(args.pipe)
         #exit(1)
