@@ -131,6 +131,9 @@ def plot_ASCD(
             expand_size = 0,
         )
 
+        print(artifact_mask.sum())
+        continue
+
 
         result_image = visualize_artifacts(images[sample_id], artifact_mask, border_width=2)
         img          = Image.fromarray(result_image.astype(np.uint8))
@@ -592,7 +595,43 @@ def check_results_exists(output_dir, method):
 
 
 
-def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path):
+def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path, backup_best_worst = False):
+    #exit(1)
+    if backup_best_worst:
+
+        generated_images_path = "/".join(images_path[0].split("/")[:-2])
+        
+        uncertaintity_maps = {}
+        with open(f"{output_dir}best_worst/res.json") as f:
+            data = json.load(f)
+
+        data = {
+            outer_k: {int(inner_k): v for inner_k, v in inner_dict.items()}
+            for outer_k, inner_dict in data.items()
+        }
+        for k in data:
+            key_sep = k.split("_")
+            timestep = key_sep[-1]
+            method_type = key_sep[0]
+            agg_type = key_sep[1]
+            method_to_save = "_".join([method_type] + key_sep[2:])
+
+            
+
+            
+            if method_to_save not in uncertaintity_maps:
+                uncertaintity_maps[method_to_save] = {}
+            uncertaintity_maps[method_to_save][agg_type] = { 'uncertaintity_maps': {},
+                                                            'uncertaintity_maps_bin': {},
+                                                            'uncertaintity_maps_dict': data[k]  }
+            for sample in data[k]:
+                
+                uncertaintity_maps[method_to_save][agg_type]['uncertaintity_maps'][int(sample)] = torch.load(f"{generated_images_path}/{sample}/{timestep}_unmap.pt")
+
+
+
+    #print(output_dir)
+    #exit(1)
     #os.makedirs("grad_cfg_uncertaintity/SD_uncertaintity/output1.jpg", exist_ok=True)
     
     # Load the sample image
@@ -604,11 +643,14 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
         # Calculate total rows needed (each agg_type has: 1 image row + 1 uncertainty row + maybe 1 binary row)
         total_rows = 0
         row_info = []
-        
+      
         for agg_type in agg_types:
             method_agg_types_dict = method_agg_types[agg_type]
-            has_binary = method_agg_types_dict['uncertaintity_maps_bin'][0] is not None if 0 in method_agg_types_dict['uncertaintity_maps_bin'] else False
-            has_map = method_agg_types_dict['uncertaintity_maps'][0] is not None if 0 in method_agg_types_dict['uncertaintity_maps'] else False
+            has_binary = len(method_agg_types_dict['uncertaintity_maps_bin']) > 0 
+            has_map = len(method_agg_types_dict['uncertaintity_maps']) > 0 
+
+            print(has_map)
+            
             if has_binary and has_map:
                 num_rows = 3
             elif has_map:
@@ -621,7 +663,7 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
             total_rows += num_rows
         
         # Create figure with all rows (8 columns for top-4 and lowest-4)
-        fig, axes = plt.subplots(total_rows, 8, figsize=(24, 5 * total_rows))
+        fig, axes = plt.subplots(total_rows, 8, figsize=(32, 4.5 * total_rows))
         if total_rows == 1:
             axes = axes.reshape(1, -1)
         
@@ -636,11 +678,12 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
             scores_dict = method_agg_types_dict['uncertaintity_maps_dict']
             sorted_samples = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
             
+            
             top_4 = sorted_samples[:4]
             lowest_4 = sorted_samples[-4:]
             
             # Add agg_type header as text annotation spanning the row
-            fig.text(0.5, 1 - ((current_row + 0.3) / total_rows), f'{agg_type}', 
+            fig.text(0.5, 1 - ((current_row + 0.14) / total_rows), f'{agg_type}', 
                     ha='center', fontsize=16, fontweight='bold', 
                     transform=fig.transFigure)
             
@@ -665,8 +708,9 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
                     if isinstance(uncertainty_map, torch.Tensor):
                         uncertainty_map = uncertainty_map.cpu().numpy()
                     
-                    axes[current_row, idx].imshow(uncertainty_map, cmap='hot')
-                    axes[current_row, idx].set_title(f'Score: {score:.4f}', fontsize=12)
+                    im = axes[current_row, idx].imshow(uncertainty_map, cmap='hot')
+                    fig.colorbar(im, ax=axes[current_row, idx],fraction=0.035, pad=0.01)
+                    #axes[current_row, idx].set_title(f'Score: {score:.4f}', fontsize=12)
                     axes[current_row, idx].axis('off')
                 
                 # Plot lowest-4 uncertainty maps
@@ -675,8 +719,9 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
                     if isinstance(uncertainty_map, torch.Tensor):
                         uncertainty_map = uncertainty_map.cpu().numpy()
                     
-                    axes[current_row, idx + 4].imshow(uncertainty_map, cmap='hot')
-                    axes[current_row, idx + 4].set_title(f'Score: {score:.4f}', fontsize=12)
+                    im = axes[current_row, idx + 4].imshow(uncertainty_map, cmap='hot')
+                    fig.colorbar(im, ax=axes[current_row, idx + 4],fraction=0.035, pad=0.01)
+                    #axes[current_row, idx + 4].set_title(f'Score: {score:.4f}', fontsize=12)
                     axes[current_row, idx + 4].axis('off')
                 
                 current_row += 1
@@ -702,6 +747,7 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
                 current_row += 1
         
         plt.tight_layout(rect=[0, 0, 1, 0.99])
+        plt.subplots_adjust(hspace=0.2)
         
         # Save figure
         output_path = os.path.join(output_dir, f'{method}.jpg')
@@ -709,6 +755,7 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
         plt.close()
         
         print(f'Saved: {output_path}')
+        #break
  
  
    
@@ -723,13 +770,17 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path)
 
 
 
-def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, images_path = None):
+def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, images_path = None, backup_best_worst = False, jump_to_vis = False):
     compare_mode = None
     output_dir = dirs_dict["compare_vis_dir"]
     timesteps_lst = methods_dict["timesteps_basic"][2:-2]
     timesteps_vis = [timesteps_lst[i] for i in np.linspace(0, len(timesteps_lst)-1, 10, dtype=int)]
-
     d_vis = {}
+
+    if jump_to_vis:
+        visualize_best_worst_per_method(d_vis, output_dir, images_path, backup_best_worst = backup_best_worst)
+
+        exit(1)
 
     if resize_fid == 299:
         resize_fid = None
@@ -753,19 +804,23 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
                             if method_to_save not in d_vis:
                                 d_vis[method_to_save] = {}
 
-                           
-                            d_vis[method_to_save][agg_calculation] = generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid = resize_fid, vis = True)
+
+                            #d_vis[method_to_save][agg_calculation] = generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid = resize_fid, vis = True, backup_best_worst = backup_best_worst)
+                            generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid = resize_fid, vis = True, backup_best_worst = backup_best_worst)
+
                     else:
                         final_method = semi_final_method
                         method_to_save = semi_method_to_save
                         if method_to_save not in d_vis:
                             d_vis[method_to_save] = {}
-                        d_vis[method_to_save][agg_calculation] = generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid =resize_fid,vis = True, start_timestep = 12, end_timestep=40)
+                        #d_vis[method_to_save][agg_calculation] = generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid =resize_fid,vis = True, start_timestep = 12, end_timestep=40, backup_best_worst = backup_best_worst)
+                        generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid =resize_fid,vis = True, start_timestep = 12, end_timestep=40, backup_best_worst = backup_best_worst)
+
             else:
                 pass
 
     #print(d_vis['basic_perTimestep_881'].keys())
-    visualize_best_worst_per_method(d_vis, output_dir, images_path)
+    visualize_best_worst_per_method(d_vis, output_dir, images_path, backup_best_worst = backup_best_worst)
     exit(1)
 
 
@@ -810,7 +865,7 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                         for end_idx in MAD_end_indices:
                             for mad_value in MAD_values:
                                 final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}${mad_value}"
-                                
+                                print(final_method)
                                 if check_results_exists(output_dir, final_method) == False:
                                     generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
                                                             compare_mode = compare_mode, 

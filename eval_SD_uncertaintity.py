@@ -120,7 +120,7 @@ def demo(args):
             culumative = False,
             dpi=150)'''
         
-        '''plot_ASCD(
+        plot_ASCD(
             latents_lst, 
             images,
             prompts,
@@ -129,9 +129,9 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
-            dpi=150)'''
+            dpi=150)
 
-        plot_ASCD(
+        '''plot_ASCD(
             latents_lst, 
             images,
             prompts,
@@ -141,7 +141,7 @@ def demo(args):
             cmap="hot",
             start_idx = start_idx,
             dpi=150,
-            ours = True)
+            ours = True)'''
             
 
 
@@ -157,7 +157,7 @@ def compare_methods(args):
     # Iterate over subdirectories sorted numerically
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
-    subdirs = subdirs[:10000]
+    #subdirs = subdirs[:10000]
     images_path = []
     for idx, subdir in enumerate(subdirs):
 
@@ -196,7 +196,9 @@ def compare_methods(args):
                                 compare_mode = args.compare_mode, 
                                 dirs_dict   = dirs_dict ,
                                 resize_fid   = args.resize_fid,
-                                images_path = images_path
+                                images_path = images_path,
+                                backup_best_worst = True,
+                                jump_to_vis = True,
                                 )
 
 

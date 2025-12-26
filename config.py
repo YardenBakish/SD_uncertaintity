@@ -23,9 +23,9 @@ import json
 
 METHODS_EVAL = {
     "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41' ], #
-    "agg_calculation": ["sum", "max", "aboveAvg", "aboveOtsu"], #
+    "agg_calculation": ["sum", "max", ], # "aboveAvg", "aboveOtsu"
     'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu", "sumOver$sum", "maxOver$sum"],
-    "agg_ASCED_calculation": ["sum", "max", "count"], #
+    "agg_ASCED_calculation": ["sum",  "count"], #"max",
 
     "MAD_values" : [3,6,10,], #1, 12
     "MAD_start_indices": [10, 12, 14, 20] ,
