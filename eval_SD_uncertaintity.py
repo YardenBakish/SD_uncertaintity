@@ -37,6 +37,10 @@ def parse_args():
     parser.add_argument('--resize_fid', type=int, default = 299, choices = [299, 512, 1024])
     parser.add_argument('--compare_mode', type=str, default = "fid_filter_high", choices = ["fid_filter_high"])
     parser.add_argument('--compare_vis', action='store_true')
+    parser.add_argument('--calc_clipscore', action='store_true')
+    parser.add_argument('--generate_var_uc_scores', action='store_true')
+
+
     
 
 
@@ -89,27 +93,42 @@ def deterministic(seed) -> None:
 
 def demo(args):
     deterministic(2024)
-    
+    apply_var_method_uc = False
+   
     for start_idx in range(0, 16, args.batch_size):
         dataset = load_dataset("jxie/flickr8k", split=f"validation[{start_idx}:{start_idx+args.batch_size}]", trust_remote_code=True)  # take 5 examples for demo
         
         
         prompts = [item["caption_0"] for item in dataset]
     
-        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
+        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True, apply_var_method_uc=apply_var_method_uc)
 
         images = output[0].images
         uncertainty_maps = output[1]["uncertainty_maps"]
         latents_lst = output[1]["latents_lst"]
+        if apply_var_method_uc:
+            pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"][9]
+
         
-
-
+        #stacked_pixel_wise_uncertainty_lst = torch.stack(pixel_wise_uncertainty_lst, dim=1).sum(dim=1).sum(dim=1) 
+       
         for idx in range(len(images)):
             print(prompts[idx])
             images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}.jpg", quality=95)
+            if apply_var_method_uc:
+                #summed = sum(pixel_wise_uncertainty_lst)
+                #print(summed.shape)
+                
+                heatmap = stacked_pixel_wise_uncertainty_lst[idx] #summed.sum(dim=1)[0]
+                plt.imshow(heatmap.detach().cpu().numpy(), cmap="hot")   # if you really need 'chot', use: cmap="hot"
+                plt.axis('off')
+                plt.savefig(f"{args.output_dir_demo}/output{start_idx+idx}H.jpg", bbox_inches='tight', pad_inches=0)
+                plt.close()
+
+
 
         
-        '''plot_uncertintiy_maps(
+        plot_uncertintiy_maps(
             uncertainty_maps, 
             images,
             prompts,
@@ -117,10 +136,10 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
-            culumative = False,
-            dpi=150)'''
+            culumative = True,
+            dpi=150)
         
-        plot_ASCD(
+        '''plot_ASCD(
             latents_lst, 
             images,
             prompts,
@@ -129,7 +148,7 @@ def demo(args):
             target_size=128,
             cmap="hot",
             start_idx = start_idx,
-            dpi=150)
+            dpi=150)'''
 
         '''plot_ASCD(
             latents_lst, 
@@ -157,6 +176,7 @@ def compare_methods(args):
     # Iterate over subdirectories sorted numerically
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
+    
     #subdirs = subdirs[:10000]
     images_path = []
     for idx, subdir in enumerate(subdirs):
@@ -208,6 +228,7 @@ def compare_methods(args):
                                     compare_mode = args.compare_mode, 
                                     dirs_dict   = dirs_dict ,
                                     resize_fid   = args.resize_fid,
+                                    calc_clipscore = args.calc_clipscore
                                     )
     
 
@@ -215,6 +236,7 @@ def compare_methods(args):
 
 
 def analyze_compare_methods(args):
+    
     collect_and_merge_results(args.output_dir_compare)
     print_stats(args.output_dir_compare)
     exit(1)
@@ -230,13 +252,13 @@ def generate_uncertaintity_samples(args):
     sample_idx = 0
     flag_cant_resume = True
     for batch_start in range(0, len(dataset), args.batch_size):
-        if flag_cant_resume:
-            output_dir_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size))
-            if os.path.isdir(output_dir_to_check):
-                sample_idx+= args.batch_size
-                continue 
-            else:
-                flag_cant_resume = False
+        #if flag_cant_resume:
+        #    output_dir_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size))
+        #    if os.path.isdir(output_dir_to_check):
+        #        sample_idx+= args.batch_size
+        #        continue 
+        #    else:
+        #        flag_cant_resume = False
         batch_end = min(batch_start + args.batch_size, len(dataset))
         batch_items = dataset[batch_start:batch_end]
         
@@ -254,10 +276,31 @@ def generate_uncertaintity_samples(args):
             prompts = batch_items['caption']
             
         # Generate images
-        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
+        output = args.pipe(prompts, apply_uc = args.apply_uc, apply_uc_on_all_timesteps=args.apply_uc_on_all_timesteps, 
+                            return_mid_reps = args.return_mid_reps,
+                            apply_var_method_uc= args.generate_var_uc_scores)
+
+        
+        
+            
+        
         images = output[0].images
         uncertainty_maps = output[1]["uncertainty_maps"]
         latents_lst = output[1]["latents_lst"]
+        pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"]
+
+        if args.generate_var_uc_scores:
+            var_uc_results = []
+            for inner in pixel_wise_uncertainty_lst:
+                stacked = torch.stack(inner, dim=1)  # [B,N,4,64,64]
+
+               
+                summed = stacked.sum(dim=1).sum(dim=1)  # -> [B,64,64]
+
+                var_uc_results.append(summed.float())
+            
+            var_uc_results = (torch.stack(var_uc_results, dim=1)).sum(dim=(-1, -2))
+           
         
         # Save each image with its prompt
         sample_idx_copy = sample_idx
@@ -265,6 +308,18 @@ def generate_uncertaintity_samples(args):
             # Create subdirectory for this sample
             sample_dir = os.path.join(args.output_dir, str(sample_idx))
             os.makedirs(sample_dir, exist_ok=True)
+
+
+            if args.generate_var_uc_scores:
+                var_uc_results_sample = var_uc_results[idx]
+                d_var_uc_results = {i: var_uc_results_sample[i].item() for i in range(len(var_uc_results_sample))}
+                with open(os.path.join(sample_dir, "var_uc.json"), "w") as f:
+                    json.dump(d_var_uc_results, f, indent=4)
+                
+                sample_idx+=1
+                continue
+
+
             
             # Save prompt to txt file
             with open(os.path.join(sample_dir, "prompt.txt"), "w") as f:
@@ -276,14 +331,16 @@ def generate_uncertaintity_samples(args):
             print(f"Sample {sample_idx}: {prompts[idx]}")
             sample_idx += 1
 
-        save_uncertainty_maps(
-            uncertainty_maps, 
-            sample_idx_copy,
-            latents_lst,
-            out_dir = args.output_dir,
-            cmap    = "hot",
-            dpi=150,
-        )
+        
+        if args.generate_var_uc_scores == False:
+            save_uncertainty_maps(
+                uncertainty_maps, 
+                sample_idx_copy,
+                latents_lst,
+                out_dir = args.output_dir,
+                cmap    = "hot",
+                dpi=150,
+            )
         #exit(1)
     
 

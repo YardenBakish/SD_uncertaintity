@@ -71,8 +71,12 @@ def print_stats(root_dir):
         data = json.load(f)
 
     # Sort methods by descending FID
-    sorted_methods = sorted(data.items(), key=lambda x: x[1]["fid"], reverse=False)
+    #data = {k: data[k] for k in data if "clipscore" in data[k]}
+
+    
+
+    sorted_methods = sorted(data.items(), key=lambda x: x[1]["precision"], reverse=False)
 
     # Print each method in order
     for method, metrics in sorted_methods:
-        print(method, metrics["fid"])
+        print(method, metrics["precision"])

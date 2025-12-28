@@ -7,11 +7,11 @@ from torchvision.models import inception_v3
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from glob import glob
-
+import random
 
 class ImageFolderDataset(Dataset):
     """Simple dataset that loads images from a folder"""
-    def __init__(self, folder_path, transform=None, file_indices = None):
+    def __init__(self, folder_path, transform=None, file_indices = None, is_random = False):
         self.folder_path = folder_path
         self.transform = transform
         self.image_files = [f for f in os.listdir(folder_path) 
@@ -27,7 +27,13 @@ class ImageFolderDataset(Dataset):
             suff = self.image_files[0].split("/")[-1]
             self.image_files = [f"{pref}/{elem}/{suff}" for elem in file_indices]
         
+        if is_random:
+            n_remove = int(len(self.image_files) * 0.16)         # how many to remove
+            to_remove = set(random.sample(self.image_files, n_remove))  # pick exactly 16% randomly
+            filtered = [x for x in self.image_files if x not in to_remove]
+            self.image_files = filtered
         
+
     def __len__(self):
         return len(self.image_files)
     
@@ -52,7 +58,7 @@ def get_inception_model(device):
     return model
 
 
-def extract_features(image_folder, model, device, batch_size=32, extract_features = None, file_indices =None):
+def extract_features(image_folder, model, device, batch_size=32, extract_features = None, is_random = False, file_indices =None):
     """Extract Inception features from all images in a folder"""
     transform = transforms.Compose([
         transforms.Resize(299),
@@ -61,7 +67,7 @@ def extract_features(image_folder, model, device, batch_size=32, extract_feature
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    dataset = ImageFolderDataset(image_folder, transform=transform, file_indices=file_indices)
+    dataset = ImageFolderDataset(image_folder, transform=transform, file_indices=file_indices, is_random = is_random)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
                            num_workers=4, pin_memory=True)
     
@@ -152,11 +158,11 @@ def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, devi
     
     # Extract features
     print(f"\nExtracting features from real images in: {real_folder}")
-
+    gen_features = extract_features(gen_folder, model, device, batch_size,is_random = True, file_indices=file_indices)
+    
     real_features = extract_features(real_folder, model, device, batch_size) #real_folder
     
     print(f"\nExtracting features from generated images in: {gen_folder}")
-    gen_features = extract_features(gen_folder, model, device, batch_size, file_indices=file_indices)
     
     # Compute metrics
     precision, recall = compute_precision_recall(real_features, gen_features, nhood_size)
@@ -166,22 +172,23 @@ def calculate_metrics(real_folder, gen_folder, nhood_size=3, batch_size=32, devi
         'recall': recall
     }
 
-'''
+
 if __name__ == "__main__":
     # Example usage
     real_folder = "datasets/coco/val2014"
-    gen_folder = "datasets/coco/val2014"
+    gen_folders = ["uncertaintity_maps/SDXL/basic/coco/", "uncertaintity_maps/1.5v/basic/coco/"]
     
-    results = calculate_metrics(
-        real_folder=real_folder,
-        gen_folder=gen_folder,
-        nhood_size=3,
-        batch_size=32
-    )
-    
-    print("\n" + "="*50)
-    print("RESULTS")
-    print("="*50)
-    print(f"Precision: {results['precision']:.4f}")
-    print(f"Recall: {results['recall']:.4f}")
-    print(f"F1 Score: {2 * results['precision'] * results['recall'] / (results['precision'] + results['recall']):.4f}")'''
+    for gen_f in gen_folders:
+        results = calculate_metrics(
+            real_folder=real_folder,
+            gen_folder=gen_f,
+            nhood_size=3,
+            batch_size=32
+        )
+            
+        print("\n" + "="*50)
+        print("RESULTS")
+        print("="*50)
+        print(f"Precision: {results['precision']:.4f}")
+        print(f"Recall: {results['recall']:.4f}")
+        print(f"F1 Score: {2 * results['precision'] * results['recall'] / (results['precision'] + results['recall']):.4f}")

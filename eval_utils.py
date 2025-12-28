@@ -12,7 +12,9 @@ import os
 import torch.nn.functional as F
 import json
 import matplotlib.pyplot as plt
-from agg_methods import get_artifact_mask, compute_frame_differences
+from agg_methods import  compute_frame_differences #,get_artifact_mask # 
+#from agg_experiments import  get_artifact_mask
+
 from agg_experiments import generate_map_wrapper
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 from diffusers import DDIMScheduler
@@ -105,7 +107,25 @@ def plot_ASCD(
 
     sequence = latents_lst if ours is False else uncertainty_maps
 
+    #####################################################
     
+    '''image_sequence = torch.stack(sequence[start_timestep:end_timestep], dim=1)
+    
+    artifact_mask = get_artifact_mask(
+        image_sequence,
+        mad_scale= 3 if ours is False else 10,
+        min_area = 4,
+        max_area = 5000,
+        min_width = 1,
+        expand_size = 0,
+    )
+    for x in artifact_mask:
+        print(x.sum())
+    exit(1)'''
+
+    ####################################################
+
+
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
   
     sequence_len = latents_lst[0].shape[0] if ours is False else sequence[timesteps[0]].shape[0]
@@ -118,10 +138,11 @@ def plot_ASCD(
             image_sequence = [np.array(sequence[ts][sample_id].cpu()).transpose(1, 2, 0) for ts in sequence]
 
         #print(image_sequence[0].shape)
-        #exit(1)
         image_sequence = image_sequence[start_timestep:end_timestep]
 
         differences = compute_frame_differences(image_sequence)
+
+        
         artifact_mask = get_artifact_mask(
             image_sequence,
             mad_scale= 3 if ours is False else 10,
@@ -130,9 +151,8 @@ def plot_ASCD(
             min_width = 1,
             expand_size = 0,
         )
-
-        print(artifact_mask.sum())
-        continue
+        
+        
 
 
         result_image = visualize_artifacts(images[sample_id], artifact_mask, border_width=2)
@@ -160,7 +180,6 @@ def plot_ASCD(
         ax1.axis("off")
 
         #print(len(differences))
-        #exit(1)
 
         #differences = differences[::2]
 
@@ -201,7 +220,7 @@ def plot_ASCD(
 
 def prepare_culumative(num_samples, last_layer_idx, uncertainty_maps, timesteps):
 
-    scheduler = DDIMScheduler.from_config("stabilityai/stable-diffusion-xl-base-1.0", subfolder="scheduler",torch_dtype=torch.float16,)
+    scheduler = DDIMScheduler.from_config("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
     alphas_cumprod = scheduler.alphas_cumprod
     #print(timesteps.int())
     #print(len(alphas_cumprod))
@@ -212,7 +231,6 @@ def prepare_culumative(num_samples, last_layer_idx, uncertainty_maps, timesteps)
 
     #weights = weights / weights.sum()
     #print(weights)
-    #exit(1)
     start_idx = 12
     timesteps = timesteps[start_idx:]
     for sample_idx in range(num_samples):
@@ -228,6 +246,37 @@ def prepare_culumative(num_samples, last_layer_idx, uncertainty_maps, timesteps)
             uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] = torch.abs(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
                 
    
+
+
+def prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps):
+
+    scheduler = DDIMScheduler.from_config("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
+    alphas_cumprod = scheduler.alphas_cumprod
+    #print(timesteps.int())
+    #print(len(alphas_cumprod))
+    
+    alpha_t_values = alphas_cumprod
+    alpha_t_values[0] -=1
+    weights = (1 - alpha_t_values) / torch.sqrt(alpha_t_values)
+
+    #weights = weights / weights.sum()
+    #print(weights)
+    start_idx = 12
+    timesteps = timesteps[start_idx:]
+    for sample_idx in range(num_samples):
+        for map_idx in range(2):
+            differences = []
+            for idx, ts in enumerate(timesteps):
+                if idx == len(timesteps) -5:
+                    break
+                uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx]
+                threshold = torch.quantile(uncertainty.float(), 0.95)
+                mask = uncertainty > threshold
+                filtered = uncertainty * mask 
+                
+                uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] += filtered #(weights[ts] * (uncertainty_next - uncertainty))
+            
+            uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] = torch.abs(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
 
 
 
@@ -260,7 +309,7 @@ def plot_uncertintiy_maps(
     img_resize = transforms.Resize((target_size, target_size))
 
     if culumative:
-        prepare_culumative(num_samples, last_layer_idx, uncertainty_maps, timesteps)
+        prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
 
     for sample_idx in range(num_samples):
         if False: #vis by layer
@@ -503,7 +552,6 @@ def save_uncertainty_maps(
     num_samples = int(uncertainty_maps[example_ts][last_layer].shape[0] / 2)
     #print(len(latents_lst))
     #print(latents_lst[0].shape)
-    #exit(1)
     for sample_idx in range(num_samples):
         for map_idx in range(1):
             for row_idx, ts in enumerate(timesteps):
@@ -564,27 +612,58 @@ class HeatmapEvalDataset(Dataset):
 
   
 
-def check_results_exists(output_dir, method):
-
+def check_results_exists(output_dir, method, calc_clipscore, skip = False):
+    
     
     global_file = f"{output_dir}/res.json"
     local_dir = f"{output_dir}/{method}"
+
+    if skip:
+        os.makedirs(local_dir, exist_ok=True)
+        return False
+
     
 
-    if os.path.isfile(global_file):
+    if os.path.isfile(global_file) and calc_clipscore == False:
         with open(global_file) as f:
             data = json.load(f)
-            if method in data:
-                print(f"Results for {method} were found! (global)")
-                return True
+        if method in data:
+            print(f"Results for {method} were found! (global)")
+            return True
+        else:
+            
+            local_file = f"{local_dir}/res.json"
+           
+            if os.path.isfile(local_file):
+                with open(local_file) as f:
+                    data = json.load(f)
+                
+                if calc_clipscore:
+                    if "clipscore" in list(data.keys()):
+                        print(f"Results for {method} were found! (local)")
+                        return True
+                else:
+
+                    if all(k in data for k in ("fid", "precision", "recall")):
+                        print(f"Results for {method} were found! (local)")
+                        return True
+    
     else:
         local_file = f"{local_dir}/res.json"
+    
         if os.path.isfile(local_file):
             with open(local_file) as f:
                 data = json.load(f)
-                if all(k in data for k in ("FID", "precision", "recall")):
-                    print(f"Results for {method} were found! (local)")
-                    return True
+                if calc_clipscore:
+                    
+                    if "clipscore" in list(data.keys()):
+                        print(f"Results for {method} were found! (local)")
+                        return True
+                else:
+                    
+                    if all(k in data for k in ("fid", "precision", "recall")):
+                        print(f"Results for {method} were found! (local)")
+                        return True
     
     os.makedirs(local_dir, exist_ok=True)
   
@@ -594,9 +673,91 @@ def check_results_exists(output_dir, method):
 
 
 
+def visualize_top_per_method_agg(uncertaintity_maps, output_dir, images_path, backup_best_worst=False):
+   
+    if backup_best_worst:
+        generated_images_path = "/".join(images_path[0].split("/")[:-2])
+        
+        uncertaintity_maps = {}
+        with open(f"{output_dir}best_worst/res.json") as f:
+            data = json.load(f)
+
+        data = {
+            outer_k: {int(inner_k): v for inner_k, v in inner_dict.items()}
+            for outer_k, inner_dict in data.items()
+        }
+        for k in data:
+            key_sep = k.split("_")
+            timestep = key_sep[-1]
+            if timestep not in ["881", "841", "921", "601", "561", "721"]:
+                continue
+            method_type = key_sep[0]
+            agg_type = key_sep[1]
+            method_to_save = "_".join([method_type] + key_sep[2:])
+            
+            if method_to_save not in uncertaintity_maps:
+                uncertaintity_maps[method_to_save] = {}
+            uncertaintity_maps[method_to_save][agg_type] = {
+                'uncertaintity_maps': {},
+                'uncertaintity_maps_bin': {},
+                'uncertaintity_maps_dict': data[k]
+            }
+            for sample in data[k]:
+                uncertaintity_maps[method_to_save][agg_type]['uncertaintity_maps'][int(sample)] = torch.load(
+                    f"{generated_images_path}/{sample}/{timestep}_unmap.pt"
+                )
+
+    # Iterate through each method and agg_type separately
+    for method in uncertaintity_maps:
+        method_agg_types = uncertaintity_maps[method]
+        
+        for agg_type in method_agg_types:
+            method_agg_types_dict = method_agg_types[agg_type]
+            
+            # Get scores and sort to find top-16
+            scores_dict = method_agg_types_dict['uncertaintity_maps_dict']
+            sorted_samples = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
+            top_16 = sorted_samples[:16]
+            
+            has_map = len(method_agg_types_dict['uncertaintity_maps']) > 0
+            
+            if not has_map:
+                continue
+            
+            # Create 8x4 grid: 8 rows (for 16 images), 4 columns (image, heatmap, image, heatmap)
+            fig, axes = plt.subplots(8, 4, figsize=(16, 32))
+            
+            # Remove all spacing
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+            
+            # Fill the grid
+            for idx, (sample_id, score) in enumerate(top_16):
+                row = idx // 2
+                col = (idx % 2) * 2
+                
+                # Display image
+                axes[row, col].imshow(Image.open(images_path[sample_id]))
+                axes[row, col].axis('off')
+                
+                # Display heatmap
+                uncertainty_map = method_agg_types_dict['uncertaintity_maps'][sample_id]
+                if isinstance(uncertainty_map, torch.Tensor):
+                    uncertainty_map = uncertainty_map.cpu().numpy()
+                
+                axes[row, col + 1].imshow(uncertainty_map, cmap='hot')
+                axes[row, col + 1].axis('off')
+            
+            # Save figure
+            output_path = os.path.join(output_dir, f'{method}_{agg_type}.jpg')
+            plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            
+            print(f'Saved: {output_path}')
+
+
 
 def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path, backup_best_worst = False):
-    #exit(1)
+   
     if backup_best_worst:
 
         generated_images_path = "/".join(images_path[0].split("/")[:-2])
@@ -773,12 +934,13 @@ def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path,
 def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, images_path = None, backup_best_worst = False, jump_to_vis = False):
     compare_mode = None
     output_dir = dirs_dict["compare_vis_dir"]
-    timesteps_lst = methods_dict["timesteps_basic"][2:-2]
+    timesteps_lst = ["921", "881", "841", "601", "721"] #methods_dict["timesteps_basic"][2:-2]
     timesteps_vis = [timesteps_lst[i] for i in np.linspace(0, len(timesteps_lst)-1, 10, dtype=int)]
     d_vis = {}
 
     if jump_to_vis:
-        visualize_best_worst_per_method(d_vis, output_dir, images_path, backup_best_worst = backup_best_worst)
+        visualize_top_per_method_agg(d_vis, output_dir, images_path, backup_best_worst=backup_best_worst)
+        #visualize_best_worst_per_method(d_vis, output_dir, images_path, backup_best_worst = backup_best_worst)
 
         exit(1)
 
@@ -804,6 +966,7 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
                             if method_to_save not in d_vis:
                                 d_vis[method_to_save] = {}
 
+                            print(final_method)
 
                             #d_vis[method_to_save][agg_calculation] = generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid = resize_fid, vis = True, backup_best_worst = backup_best_worst)
                             generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = None, resize_fid = resize_fid, vis = True, backup_best_worst = backup_best_worst)
@@ -824,7 +987,7 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
     exit(1)
 
 
-def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None):
+def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, calc_clipscore = False):
 
     output_dir = dirs_dict["output_dir_compare"]
 
@@ -845,13 +1008,15 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                     if method == "perTimestep":     
                         for timestep in methods_dict["timesteps_basic"]:
                             final_method = f"{semi_final_method}_{timestep}"
-                            if check_results_exists(output_dir, final_method) == False:
-                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid)
+                            
+                            if check_results_exists(output_dir, final_method,calc_clipscore) == False:
+                                
+                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid, calc_clipscore = calc_clipscore)
 
                     else:
                         final_method = semi_final_method
-                        if check_results_exists(output_dir, final_method) == False:
-                            generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid =resize_fid)
+                        if check_results_exists(output_dir, final_method,calc_clipscore) == False:
+                            generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid =resize_fid, calc_clipscore = calc_clipscore)
             else:
                 method_name = "ASCED"
                 agg_types = methods_dict["agg_ASCED_calculation"]
@@ -865,15 +1030,16 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                         for end_idx in MAD_end_indices:
                             for mad_value in MAD_values:
                                 final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}${mad_value}"
-                                print(final_method)
-                                if check_results_exists(output_dir, final_method) == False:
+                                
+                                if check_results_exists(output_dir, final_method,calc_clipscore) == False:
                                     generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
                                                             compare_mode = compare_mode, 
                                                             resize_fid =resize_fid,
                                                             start_timestep = start_idx,
                                                             end_timestep = end_idx,
                                                             mad_value = mad_value,
-                                                            asced = True)
+                                                            asced = True,
+                                                            calc_clipscore = calc_clipscore)
 
                 
 

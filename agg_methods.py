@@ -72,7 +72,9 @@ def get_artifact_mask(
        
         artifact_mask |= diff_max > threshold
 
+    
 
+    
     labeled_mask, num_features = label(artifact_mask)
 
    
@@ -84,6 +86,7 @@ def get_artifact_mask(
                 mask_sizes[labeled_mask == i] = True
         artifact_mask = mask_sizes
 
+
     labeled_mask, num_features = label(artifact_mask)
     filtered_mask = np.zeros_like(artifact_mask, dtype=bool)
     structuring_element = np.ones((min_width, min_width), dtype=bool)
@@ -94,6 +97,9 @@ def get_artifact_mask(
         if eroded_region.sum() > 0:
             filtered_mask |= region
 
+    #print(filtered_mask.sum())
+    #print("after")
+    #exit(1)
     if expand_size > 0:
         mask_tensor = torch.from_numpy(filtered_mask).bool().float()
         kernel_size = 2 * expand_size + 1

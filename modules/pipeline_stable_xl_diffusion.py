@@ -14,6 +14,7 @@
 
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from modules.uncertaintity_guidance import get_uncertainty_guided_score_with_percentile
 
 import torch
 from transformers import (
@@ -858,6 +859,9 @@ class StableDiffusionXLPipeline(
         return_mid_reps: Optional[bool] = False,
         uc_num_timesteps : Optional[int] = 6,
         apply_uc_on_all_timesteps : Optional[bool] = False,
+        apply_var_method_uc: Optional[bool] = False,
+        percentile: float = 0.95,
+        lr: float | Callable[[int], float] = 0.001,
 
         callback_on_step_end: Optional[
             Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
@@ -1204,8 +1208,9 @@ class StableDiffusionXLPipeline(
         
         uncertainty_maps = {ts.detach().item(): {} for ts in timesteps_to_analyze}
         latents_lst = []
+        all_pixel_wise_uncertainty_lst = []
+        tmp_pixel_wise_uncertainty_lst = []
 
-      
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -1287,6 +1292,30 @@ class StableDiffusionXLPipeline(
                     # Based on 3.4. in https://huggingface.co/papers/2305.08891
                     noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
+                
+                if apply_var_method_uc:
+                    extra_diffusion_kwargs = dict(cross_attention_kwargs=cross_attention_kwargs, added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,)
+                    
+                    _, pixel_wise_uncertainty = get_uncertainty_guided_score_with_percentile(noise_pred, 
+                                                latent_model_input, 
+                                                t, 
+                                                prompt_embeds, 
+                                                self.unet, 
+                                                alpha_hat_t=self.scheduler.alphas_cumprod[t], 
+                                                percentile=percentile,
+                                                guidance_scale=guidance_scale, 
+                                                model_type='stable-diffusion',
+                                                lr=0.99, 
+                                                extra_diffusion_kwargs=extra_diffusion_kwargs)
+                        
+                    tmp_pixel_wise_uncertainty_lst.append(pixel_wise_uncertainty)
+                    if i % 4 == 3:
+                        all_pixel_wise_uncertainty_lst.append(tmp_pixel_wise_uncertainty_lst)
+                        tmp_pixel_wise_uncertainty_lst = []
+                
+                
+                
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
@@ -1375,4 +1404,4 @@ class StableDiffusionXLPipeline(
         if not return_dict:
             return (image,)
 
-        return StableDiffusionXLPipelineOutput(images=image), {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst}
+        return StableDiffusionXLPipelineOutput(images=image), {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst, "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst}

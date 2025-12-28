@@ -21,6 +21,7 @@ import json
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils import *
+from metrics_clipscore import calculate_clipscore_metric
 
 from scipy.ndimage import (
     binary_erosion,
@@ -70,27 +71,32 @@ def get_artifact_mask(
             smoothed_diffs[b, i] = gaussian_filter(diffs[b, i], sigma=2)
 
     artifact_masks = np.zeros((B, H, W), dtype=bool)
+    diff_max = np.max(smoothed_diffs, axis=-1)
+
     
     # Reshape to [B, N-1, H*W*C] for median calculations
     flat_diffs = smoothed_diffs.reshape(B, N-1, -1)
-
     medians = np.median(flat_diffs, axis=2, keepdims=True) # [B, N-1, 1]
     mads = np.median(np.abs(flat_diffs - medians), axis=2, keepdims=True)  # [B, N-1, 1]
     thresholds = medians + mad_scale * 1.4826 * mads
 
-    diff_max = np.max(smoothed_diffs, axis=-1)
     thresholds = thresholds.reshape(B, N-1, 1, 1)
-
-    #if agg_type == "sum" or agg_type == "max":
-    #    cond  = diff_max > thresholds
-    #    scores = (diff_max * cond).sum(axis=(1,2,3))
-    #    return scores  
-        
-
-
     artifact_masks = np.any(diff_max > thresholds, axis=1)
+
+    
+    '''print(artifact_masks.shape)
+
+    print(artifact_masks[0].sum())
+    exit(1)'''
+
+    if agg_type == "sum" or agg_type == "max":
+        cond  = diff_max > thresholds
+        scores = (diff_max * cond).sum(axis=(1,2,3))
+        return scores  
+        
    
     filtered_masks = np.zeros((B, H, W), dtype=bool)
+    
     
 
     for b in range(B):
@@ -114,9 +120,10 @@ def get_artifact_mask(
             eroded_region = binary_erosion(region, structure=structuring_element)
             if eroded_region.sum() > 0:
                 filtered_masks[b] |= region
-    
-    
+        
+        
     return filtered_masks.sum(axis=(1, 2))
+    #return filtered_masks.sum(axis=(1, 2))
 
 
 
@@ -342,7 +349,8 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
                         asced = False,
                         mad_value = None,
                         backup_best_worst = False,
-                        num_workers=4):
+                        num_workers=4,
+                        calc_clipscore = False):
     """
     Optimized version using DataLoader for parallel loading + batch processing.
     
@@ -442,6 +450,13 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
         file_ids = [elem[0] for elem in file_ids]
         len_file_ids = len(file_ids)
         file_ids_84 = file_ids[int(0.16 * len_file_ids):]
+        
+        if calc_clipscore:
+            d["clipscore"] = calculate_clipscore_metric(fake_dataset_dir, batch_size=5, file_indices = file_ids_84)
+            update_json(f"{final_output_dir}/res.json", d)
+            return 
+        
+        
 
         prec_rec_res = calculate_metrics(
             real_folder=real_dataset_dir,
@@ -458,6 +473,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
         d["fid"] = fid_res
         
         update_json(f"{final_output_dir}/res.json", d)
+        
 
         
     if vis and backup_best_worst:

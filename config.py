@@ -23,7 +23,7 @@ import json
 
 METHODS_EVAL = {
     "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41' ], #
-    "agg_calculation": ["sum", "max", ], # "aboveAvg", "aboveOtsu"
+    "agg_calculation": ["sum", "max",  ], # "aboveAvg", "aboveOtsu"
     'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu", "sumOver$sum", "maxOver$sum"],
     "agg_ASCED_calculation": ["sum",  "count"], #"max",
 
@@ -34,13 +34,13 @@ METHODS_EVAL = {
     
     "methods": {
 
-        "perTimestep": False,
+        "perTimestep": True,
         "globalTimestep": False,
 
 
         "ASCEDOurs": False,
         
-        "ASCEDLatent": True
+        "ASCEDLatent": False
        
     }
 }
@@ -72,7 +72,10 @@ def set_config(args, gen_samples = False):
             args.loaded_dataset = Dataset.from_pandas(df.reset_index(drop=True))
             args.loaded_dataset = args.loaded_dataset.select(range(30000))
 
-           
+            if args.generate_var_uc_scores:
+                args.apply_uc = False if args.generate_var_uc_scores else True, 
+                args.apply_uc_on_all_timesteps=False if args.generate_var_uc_scores else True, 
+                args.return_mid_reps = False if args.generate_var_uc_scores else True
 
             #print(df.head(5))
             #print("Total rows:", len(df))
@@ -98,6 +101,9 @@ def set_config(args, gen_samples = False):
         args.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float16, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
         args.batch_size = 2
 
+    #if args.generate_var_uc_scores:
+    #    args.batch_size = 1
+
     if args.mode == "compare_methods":
         args.methods_eval = METHODS_EVAL
 
@@ -106,10 +112,20 @@ def set_config(args, gen_samples = False):
             args.methods_eval["timesteps_basic"].append('441')
 
         if args.agg_method:
+
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+                
+            args.methods_eval["methods"]["perTimestep"] = True
             args.methods_eval["agg_calculation"] =  [args.agg_method] 
   
 
         if args.agg_MAD_method:
+
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+                
+            args.methods_eval["methods"]["ASCEDLatent"] = True
             args.methods_eval["agg_ASCED_calculation"] =  [args.agg_MAD_method] 
 
 
