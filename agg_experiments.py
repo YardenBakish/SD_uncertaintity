@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import torch
 #from diffusers import StableDiffusionPipeline
+from diffusers import DDIMScheduler
 
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from torchmetrics.multimodal import CLIPScore
@@ -50,6 +51,7 @@ def get_artifact_mask(
     max_area: int = 10000,
     min_width: int = 5,
     expand_size: int = 0,
+    return_map: bool=False,
     agg_type = None,
 ) -> np.ndarray:
     smoothed_diffs = []
@@ -91,6 +93,8 @@ def get_artifact_mask(
 
     if agg_type == "sum" or agg_type == "max":
         cond  = diff_max > thresholds
+        if return_map:
+            return (diff_max * cond).sum(axis=(1))
         scores = (diff_max * cond).sum(axis=(1,2,3))
         return scores  
         
@@ -280,7 +284,73 @@ def generate_batch_map_perTimestep(latents_batch, agg_type, timestep_index):
         return torch.stack(scores), torch.stack(bin_maps)
 
 
-def generate_batch_map_globalTimestep(latents_batch, agg_type):
+
+
+def generate_special_batch_map_globalTimestep(latents_batch, agg_type, model_path = None, global_ts = None):
+    B, N, H, W = latents_batch.shape
+    
+    scheduler = DDIMScheduler.from_config(model_path, subfolder="scheduler",torch_dtype=torch.float16,)
+    alphas_cumprod = scheduler.alphas_cumprod
+    alpha_t_values = alphas_cumprod
+    #print(alpha_t_values)
+    #alpha_t_values[0] -=1
+  
+    weights = (1 - alpha_t_values) / torch.sqrt(alpha_t_values)
+
+    
+    weights = weights[np.array(global_ts)]
+    
+    use_weights = 'Weighted' in agg_type
+    if use_weights:
+        w = weights.view(1, N, 1, 1)
+    accumulated = latents_batch[:, 0, :, :].clone()
+
+    if 'diff' in agg_type:
+        # Compute differences between consecutive maps
+        # Shape: (B, N-1, H, W)
+        diffs = latents_batch[:, 1:, :, :] - latents_batch[:, :-1, :, :]
+        if use_weights:
+            diffs = diffs * w[:, 1:, :, :]  # Apply weights[1:] to diffs
+        # Accumulate differences to the first map
+        # Sum along the sequence dimension (dim=1)
+        accumulated = accumulated + diffs.sum(dim=1)
+    elif 'pr' in agg_type:
+        # Process each map in the sequence (starting from index 1)
+        for i in range(N):
+            current_map = latents_batch[:, i, :, :]
+            
+            # Compute 95th percentile threshold per batch
+            # Flatten spatial dimensions for percentile computation
+            # Shape: (B, H*W)
+            flat_maps = current_map.reshape(B, -1)
+            
+            # Compute threshold per batch: Shape (B, 1)
+            thresholds = torch.quantile(flat_maps.float(), 0.95, dim=1, keepdim=True)
+            
+            # Reshape threshold to broadcast: (B, 1, 1)
+            thresholds = thresholds.unsqueeze(-1)
+            
+            # Create mask and filter
+            mask = current_map > thresholds
+            filtered = current_map * mask
+            if use_weights:
+                filtered = filtered * weights[i]
+            # Add filtered map to accumulator
+            accumulated = accumulated + filtered
+    
+    # Apply absolute value to accumulated maps
+    accumulated = torch.abs(accumulated)
+    result = accumulated.sum(dim=(1, 2))
+
+   
+    return result, accumulated
+    
+
+
+
+
+
+def generate_batch_map_globalTimestep(latents_batch, agg_type, model_path = None, global_ts = None):
     """
     Process a batch of samples for globalTimestep method.
     
@@ -292,6 +362,11 @@ def generate_batch_map_globalTimestep(latents_batch, agg_type):
         scores: [batch_size] tensor of scores
         result_maps: [batch_size, ...] tensor of maps
     """
+
+    if '$' not in agg_type:
+        return generate_special_batch_map_globalTimestep(latents_batch, agg_type, model_path = model_path, global_ts = global_ts)
+
+
     parts = agg_type.split('$')
     reduce_op, select_op = parts[0], parts[1]
     
@@ -350,7 +425,11 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
                         mad_value = None,
                         backup_best_worst = False,
                         num_workers=4,
-                        calc_clipscore = False):
+                        calc_clipscore = False,
+                        vis_score_dist = False):
+    
+    
+    
     """
     Optimized version using DataLoader for parallel loading + batch processing.
     
@@ -364,14 +443,23 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
     fake_dataset_dir = dirs_dict["fake_dataset_dir"]
     output_dir_vis = dirs_dict["compare_vis_dir"]
     
+    model_name = output_dir_vis.split("/")[-1]
+    model_path = "stabilityai/stable-diffusion-xl-base-1.0" if model_name == "SDXL" else "runwayml/stable-diffusion-v1-5"
+   
     all_unmaps, all_latents, time_steps_sorted = x
 
     
 
     # Apply timestep filtering to time_steps_sorted
     filtered_time_steps = time_steps_sorted
- 
-
+    
+    global_ts = None
+    if end_timestep is not None:
+        global_ts = filtered_time_steps[:end_timestep]
+        
+    if start_timestep is not None:
+        global_ts = global_ts[start_timestep:] 
+   
     method_sep = method.split("_")
     agg_type = method_sep[1]
     type_method = method_sep[0]
@@ -411,6 +499,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
             timestep = int(method_sep[-1])
             timestep_index = filtered_time_steps.index(timestep)
             
+            
             scores, bin_maps = generate_batch_map_perTimestep(latents_batch, agg_type, timestep_index)
             
             # Store results
@@ -422,7 +511,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
                         uncertaintity_maps_bin[sample_idx] = bin_maps[i]
         
         elif type_method == "basic" and "globalTimestep" in method:
-            scores, result_maps = generate_batch_map_globalTimestep(latents_batch, agg_type)
+            scores, result_maps = generate_batch_map_globalTimestep(latents_batch, agg_type, model_path, global_ts)
             
             # Store results
             for i, sample_idx in enumerate(indices.tolist()):
@@ -446,17 +535,52 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
 
     d = {}
     if compare_mode == "fid_filter_high":
+
+        if vis_score_dist:
+            import matplotlib.pyplot as plt
+            output_vis_dir = dirs_dict["compare_vis_dir"]
+            values = list(uncertaintity_maps_dict.values())
+            mean_val = np.mean(values)
+            std_val  = np.std(values)
+
+            #threshold = mean_val + std_val
+            #count_above = np.sum(values > threshold)
+            
+            # Plot
+            plt.hist(values, bins='auto', edgecolor='black', linewidth=0.5)
+            plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f"μ = {mean_val:.6f}")
+            #plt.axvline(mean_val + std_val, color='blue', linestyle='--', linewidth=1.5, label=f"μ + σ = {mean_val+std_val:.6f}")
+            #plt.axvline(mean_val - std_val, color='green', linestyle='--', linewidth=1.5, label=f"μ - σ = {mean_val-std_val:.6f}")
+
+            plt.xticks(
+                [mean_val - std_val, mean_val, mean_val + std_val],
+                [f"μ - σ\n{mean_val-std_val:.6f}", f"μ\n{mean_val:.6f}", f"μ + σ\n{mean_val+std_val:.6f}"]
+            )
+
+            #plt.xlabel("Value (μ = mean)")  # shows μ on the x-axis label
+            plt.ylabel("Frequency")
+            plt.title("Value Distribution")
+            plt.legend()
+            plt.savefig(f"{output_vis_dir}/dist_{method}.jpg", dpi=300, bbox_inches="tight")
+            plt.show()
+            
+            return
+
+            
         file_ids = sorted(uncertaintity_maps_dict.items(), key=lambda x: x[1], reverse=True)
         file_ids = [elem[0] for elem in file_ids]
+    
+        
         len_file_ids = len(file_ids)
         file_ids_84 = file_ids[int(0.16 * len_file_ids):]
-        
+ 
         if calc_clipscore:
             d["clipscore"] = calculate_clipscore_metric(fake_dataset_dir, batch_size=5, file_indices = file_ids_84)
             update_json(f"{final_output_dir}/res.json", d)
             return 
         
-        
+        fid_res = compute_fid_custom(fake_dataset_dir, real_dataset_dir, file_indices=file_ids_84)
+        d["fid"] = fid_res
 
         prec_rec_res = calculate_metrics(
             real_folder=real_dataset_dir,
@@ -469,8 +593,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
         d["precision"] = prec_rec_res["precision"]
         d["recall"] = prec_rec_res["recall"]
       
-        fid_res = compute_fid_custom(fake_dataset_dir, real_dataset_dir, file_indices=file_ids_84)
-        d["fid"] = fid_res
+        
         
         update_json(f"{final_output_dir}/res.json", d)
         

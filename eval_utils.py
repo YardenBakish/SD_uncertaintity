@@ -262,6 +262,8 @@ def prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps,
     #weights = weights / weights.sum()
     #print(weights)
     start_idx = 12
+    masks = []
+    print(len(timesteps))
     timesteps = timesteps[start_idx:]
     for sample_idx in range(num_samples):
         for map_idx in range(2):
@@ -277,8 +279,9 @@ def prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps,
                 uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] += filtered #(weights[ts] * (uncertainty_next - uncertainty))
             
             uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] = torch.abs(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
-
-
+            if map_idx == 0:
+                masks.append(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
+    return masks
 
 def plot_uncertintiy_maps(
     uncertainty_maps, 
@@ -612,7 +615,7 @@ class HeatmapEvalDataset(Dataset):
 
   
 
-def check_results_exists(output_dir, method, calc_clipscore, skip = False):
+def check_results_exists(output_dir, method, calc_clipscore=False, skip = False):
     
     
     global_file = f"{output_dir}/res.json"
@@ -754,6 +757,82 @@ def visualize_top_per_method_agg(uncertaintity_maps, output_dir, images_path, ba
             
             print(f'Saved: {output_path}')
 
+
+
+def visualize_top36_per_method_agg(uncertaintity_maps, output_dir, images_path, backup_best_worst=False):
+   
+    if backup_best_worst:
+        generated_images_path = "/".join(images_path[0].split("/")[:-2])
+        
+        uncertaintity_maps = {}
+        with open(f"{output_dir}best_worst/res.json") as f:
+            data = json.load(f)
+
+        data = {
+            outer_k: {int(inner_k): v for inner_k, v in inner_dict.items()}
+            for outer_k, inner_dict in data.items()
+        }
+        for k in data:
+            key_sep = k.split("_")
+            timestep = key_sep[-1]
+            if timestep not in ["881", "841", "921", "601", "561", "721"]:
+                continue
+            method_type = key_sep[0]
+            agg_type = key_sep[1]
+            method_to_save = "_".join([method_type] + key_sep[2:])
+            
+            if method_to_save not in uncertaintity_maps:
+                uncertaintity_maps[method_to_save] = {}
+            uncertaintity_maps[method_to_save][agg_type] = {
+                'uncertaintity_maps': {},
+                'uncertaintity_maps_bin': {},
+                'uncertaintity_maps_dict': data[k]
+            }
+            for sample in data[k]:
+                uncertaintity_maps[method_to_save][agg_type]['uncertaintity_maps'][int(sample)] = torch.load(
+                    f"{generated_images_path}/{sample}/{timestep}_unmap.pt"
+                )
+
+    # Iterate through each method and agg_type separately
+    for method in uncertaintity_maps:
+        method_agg_types = uncertaintity_maps[method]
+        
+        for agg_type in method_agg_types:
+            method_agg_types_dict = method_agg_types[agg_type]
+            
+            # Get scores and sort to find top-16
+            scores_dict = method_agg_types_dict['uncertaintity_maps_dict']
+            sorted_samples = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
+            top_16 = sorted_samples[:81]
+            
+            has_map = len(method_agg_types_dict['uncertaintity_maps']) > 0
+            
+            if not has_map:
+                continue
+            
+            # Create 8x4 grid: 8 rows (for 16 images), 4 columns (image, heatmap, image, heatmap)
+            fig, axes = plt.subplots(9, 9, figsize=(54, 54))
+            
+            # Remove all spacing
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+            
+            # Fill the grid
+            for idx, (sample_id, score) in enumerate(top_16):
+                row = idx // 9
+                col = (idx % 9)
+                
+                # Display image
+                axes[row, col].imshow(Image.open(images_path[sample_id]))
+                axes[row, col].axis('off')
+                
+                
+        
+            # Save figure
+            output_path = os.path.join(output_dir, f'{method}_{agg_type}36.jpg')
+            plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            
+            print(f'Saved: {output_path}')
 
 
 def visualize_best_worst_per_method(uncertaintity_maps, output_dir, images_path, backup_best_worst = False):
@@ -936,10 +1015,12 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
     output_dir = dirs_dict["compare_vis_dir"]
     timesteps_lst = ["921", "881", "841", "601", "721"] #methods_dict["timesteps_basic"][2:-2]
     timesteps_vis = [timesteps_lst[i] for i in np.linspace(0, len(timesteps_lst)-1, 10, dtype=int)]
+    print(timesteps_vis)
     d_vis = {}
 
     if jump_to_vis:
-        visualize_top_per_method_agg(d_vis, output_dir, images_path, backup_best_worst=backup_best_worst)
+        visualize_top36_per_method_agg(d_vis, output_dir, images_path, backup_best_worst=backup_best_worst)
+        #visualize_top_per_method_agg(d_vis, output_dir, images_path, backup_best_worst=backup_best_worst)
         #visualize_best_worst_per_method(d_vis, output_dir, images_path, backup_best_worst = backup_best_worst)
 
         exit(1)
@@ -987,7 +1068,7 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
     exit(1)
 
 
-def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, calc_clipscore = False):
+def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, calc_clipscore = False, vis_score_dist = False):
 
     output_dir = dirs_dict["output_dir_compare"]
 
@@ -1008,15 +1089,29 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                     if method == "perTimestep":     
                         for timestep in methods_dict["timesteps_basic"]:
                             final_method = f"{semi_final_method}_{timestep}"
-                            
-                            if check_results_exists(output_dir, final_method,calc_clipscore) == False:
+                            print(final_method)
+                            if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
                                 
-                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid, calc_clipscore = calc_clipscore)
+                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid, calc_clipscore = calc_clipscore, vis_score_dist = vis_score_dist)
 
                     else:
-                        final_method = semi_final_method
-                        if check_results_exists(output_dir, final_method,calc_clipscore) == False:
-                            generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid =resize_fid, calc_clipscore = calc_clipscore)
+                        #final_method = semi_final_method
+                        print(final_method)
+                        GLOBAL_start_indices = methods_dict["global_start_indices"]
+                        GLOBAL_end_indices = methods_dict["global_end_indices"]
+                        for start_idx in GLOBAL_start_indices:
+                            for end_idx in GLOBAL_end_indices:
+                                final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}"
+                                
+
+                                if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
+                                    generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
+                                    compare_mode = compare_mode, 
+                                    resize_fid =resize_fid, 
+                                    calc_clipscore = calc_clipscore,
+                                    start_timestep = start_idx,
+                                    end_timestep = end_idx, 
+                                    vis_score_dist = vis_score_dist)
             else:
                 method_name = "ASCED"
                 agg_types = methods_dict["agg_ASCED_calculation"]
@@ -1031,7 +1126,7 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                             for mad_value in MAD_values:
                                 final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}${mad_value}"
                                 
-                                if check_results_exists(output_dir, final_method,calc_clipscore) == False:
+                                if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
                                     generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
                                                             compare_mode = compare_mode, 
                                                             resize_fid =resize_fid,
@@ -1039,7 +1134,8 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                                                             end_timestep = end_idx,
                                                             mad_value = mad_value,
                                                             asced = True,
-                                                            calc_clipscore = calc_clipscore)
+                                                            calc_clipscore = calc_clipscore,
+                                                            vis_score_dist = vis_score_dist)
 
                 
 

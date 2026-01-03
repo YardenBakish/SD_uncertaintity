@@ -4,7 +4,7 @@ from diffusers import DDIMScheduler
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from modules.pipeline_stable_xl_diffusion import StableDiffusionXLPipeline
 from datasets import Dataset
-
+from diffusers import PixArtSigmaPipeline
 from torchmetrics.multimodal import CLIPScore
 from PIL import Image
 from datasets import load_dataset
@@ -24,18 +24,25 @@ import json
 METHODS_EVAL = {
     "timesteps_basic": ['921', '901', '881', '861', '841', '821', '801', '781', '761', '741', '721', '701', '681', '661', '641', '621', '601', '581', '561', '541', '521', '501', '481', '461', '441', '421', '401', '381', '361', '341', '321', '301', '281', '261', '241', '221', '201', '181', '161', '141', '121', '101', '81', '61', '41' ], #
     "agg_calculation": ["sum", "max",  ], # "aboveAvg", "aboveOtsu"
-    'global_agg_calculation': ["sumEach$max", "maxEach$max", "sumEach$otsu", "maxEach$otsu", "sumOver$sum", "maxOver$sum"],
+    'global_agg_calculation': ["pr", "diff", "diffWeighted","prWeighted",    ], # "sumEach$max",  "sumEach$otsu",  "sumOver$sum", #"maxEach$max", "maxEach$otsu", "maxOver$sum"
     "agg_ASCED_calculation": ["sum",  "count"], #"max",
+
+    "global_start_indices": [3, 6, 12, 20],
+    "global_end_indices": [-5,-8,-12], #calculated as naegative (-5)
+
 
     "MAD_values" : [3,6,10,], #1, 12
     "MAD_start_indices": [10, 12, 14, 20] ,
 
     "MAD_end_indices": [24, 27, 30,] , # 32, 40
     
+
+
+
     "methods": {
 
-        "perTimestep": True,
-        "globalTimestep": False,
+        "perTimestep": False,
+        "globalTimestep": True,
 
 
         "ASCEDOurs": False,
@@ -101,11 +108,46 @@ def set_config(args, gen_samples = False):
         args.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float16, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
         args.batch_size = 2
 
+    elif args.model == "PixArt":
+        scheduler = DDIMScheduler.from_config("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", subfolder="scheduler",torch_dtype=torch.float16,)
+        args.pipe = PixArtSigmaPipeline.from_pretrained(
+            "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", 
+            torch_dtype=torch.float16,
+            scheduler = scheduler,
+            use_safetensors=True,
+        ).to("cuda")
+
+        print(args.pipe)
+        exit(1)
+
+        
+        args.batch_size = 2
+        
+
+
     #if args.generate_var_uc_scores:
     #    args.batch_size = 1
 
     if args.mode == "compare_methods":
         args.methods_eval = METHODS_EVAL
+
+        if args.use_global:
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            args.methods_eval["methods"]["globalTimestep"] = True
+            return
+
+
+        if args.vis_score_dist:
+            args.methods_eval["timesteps_basic"] = ["441","921","881","841", ]
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            args.methods_eval["methods"]["perTimestep"] = True
+            args.methods_eval["methods"]["ASCEDLatent"] = True
+            args.methods_eval["agg_calculation"] = ["sum"]
+
+
+
 
         args.methods_eval["timesteps_basic"] = args.methods_eval["timesteps_basic"][::2]
         if '441' not in args.methods_eval["timesteps_basic"]:

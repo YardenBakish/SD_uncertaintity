@@ -1,6 +1,12 @@
 import json
 import shutil
 import os
+import numpy as np
+import torch
+
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+from PIL import Image
 
 def update_json(filename, d):
     try:
@@ -71,12 +77,62 @@ def print_stats(root_dir):
         data = json.load(f)
 
     # Sort methods by descending FID
-    #data = {k: data[k] for k in data if "clipscore" in data[k]}
+    metric = "fid"
+    if metric == "clipscore":
+        data = {k: data[k] for k in data if "clipscore" in data[k]}
 
-    
+    reverse = metric == "fid"
 
-    sorted_methods = sorted(data.items(), key=lambda x: x[1]["precision"], reverse=False)
+    sorted_methods = sorted(data.items(), key=lambda x: x[1][metric], reverse=reverse)
 
     # Print each method in order
     for method, metrics in sorted_methods:
-        print(method, metrics["precision"])
+        print(method, metrics[metric])
+
+
+
+def save_overlay(
+    image_pil,
+    heatmap,
+    out_path,
+    alpha=0.45,
+    cmap="hot",
+    target_size=512,
+):
+    """
+    image_pil: PIL.Image (512x512)
+    heatmap: torch.Tensor or np.ndarray (64x64) or (1,64,64)
+    """
+
+    # --- to torch [1,1,H,W]
+    if isinstance(heatmap, np.ndarray):
+        heatmap = torch.from_numpy(heatmap)
+    if heatmap.dim() == 2:
+        heatmap = heatmap.unsqueeze(0).unsqueeze(0)
+    elif heatmap.dim() == 3:
+        heatmap = heatmap.unsqueeze(0)
+
+    heatmap = heatmap.float()
+
+    # --- resize to image size
+    heatmap = F.interpolate(
+        heatmap,
+        size=(target_size, target_size),
+        mode="bilinear",
+        align_corners=False,
+    )[0, 0]
+
+    # --- normalize for visualization
+    heatmap = heatmap - heatmap.min()
+    if heatmap.max() > 0:
+        heatmap = heatmap / heatmap.max()
+
+    heatmap = heatmap.cpu().numpy()
+
+    # --- plot overlay
+    plt.figure(figsize=(5, 5))
+    plt.imshow(image_pil)
+    plt.imshow(heatmap, cmap=cmap, alpha=alpha)
+    plt.axis("off")
+    plt.savefig(out_path, bbox_inches="tight", pad_inches=0)
+    plt.close()

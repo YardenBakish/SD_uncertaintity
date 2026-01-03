@@ -12,9 +12,13 @@ import os
 import torch.nn.functional as F
 from eval_utils import *
 from utils import *
-
+from agg_experiments import get_artifact_mask
 import matplotlib.pyplot as plt
 from config import set_config
+
+from metrics_clipscore import calculate_clipscore_metric
+from metrics import compute_fid_custom
+from metrics2 import calculate_metrics
 
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 import argparse
@@ -30,14 +34,25 @@ preprocess = transforms.Compose([
 
 def parse_args():
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 'generate_eval_heatmaps', 'demo', 'compare_methods', 'analyze_compare_methods'])
-    parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL'])
+    parser.add_argument('--mode', type=str, default = 'demo', choices = ['generate_uncertaintity_samples', 
+                                                                         'generate_eval_heatmaps', 
+                                                                         'demo', 
+                                                                         'compare_methods', 
+                                                                         'analyze_compare_methods',
+                                                                         'eval_var_uc',
+                                                                         'qualitative'])
+    parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL', 'PixArt'])
 
 
     parser.add_argument('--resize_fid', type=int, default = 299, choices = [299, 512, 1024])
     parser.add_argument('--compare_mode', type=str, default = "fid_filter_high", choices = ["fid_filter_high"])
     parser.add_argument('--compare_vis', action='store_true')
     parser.add_argument('--calc_clipscore', action='store_true')
+    parser.add_argument('--demo_correct', action='store_true')
+
+    parser.add_argument('--vis_score_dist', action='store_true')
+    parser.add_argument('--use_global', action='store_true')
+
     parser.add_argument('--generate_var_uc_scores', action='store_true')
 
 
@@ -49,6 +64,7 @@ def parse_args():
 
     parser.add_argument('--generation_method', type=str, default = 'basic', choices = ['basic'])
     parser.add_argument('--agg_method', type=str, choices = ["sum", "max", "aboveAvg", "aboveOtsu"])
+
     parser.add_argument('--agg_MAD_method', type=str, choices = ["sum", "max", "count"])
 
 
@@ -59,6 +75,8 @@ def parse_args():
     args.output_dir = f"uncertaintity_maps/{args.model}/{args.generation_method}/{args.dataset}"
     args.output_dir_demo = f"uncertaintity_maps_demo/{args.model}"
     args.output_dir_compare = f"uncertaintity_maps_compare/{args.dataset}/{args.model}/{args.compare_mode}/{args.resize_fid}"
+    args.qualitative = f"uncertaintity_maps_demo/qualitative/{args.model}"
+
 
     args.output_vis_dir_compare = f"visualizations/compare/{args.dataset}/{args.model}/"
 
@@ -74,6 +92,8 @@ def parse_args():
     os.makedirs(args.output_dir_demo, exist_ok=True)
     os.makedirs(args.output_dir_compare, exist_ok=True)
     os.makedirs(args.output_vis_dir_compare, exist_ok=True)
+    os.makedirs(args.qualitative, exist_ok=True)
+
 
 
 
@@ -91,6 +111,118 @@ def deterministic(seed) -> None:
 
 
 
+
+def demo_correct(args):
+    import torchvision.transforms as T
+    import matplotlib.cm as cm
+    from diffusers import StableDiffusionInpaintPipeline 
+
+    deterministic(2024)
+    apply_var_method_uc = False
+
+    seed = 0  # same seed as first generation
+   
+    for start_idx in range(0, 16, args.batch_size):
+        dataset = load_dataset("jxie/flickr8k", split=f"validation[{start_idx}:{start_idx+args.batch_size}]", trust_remote_code=True)  # take 5 examples for demo
+        
+        
+        prompts = [item["caption_0"] for item in dataset]
+        generator = torch.Generator(device="cuda").manual_seed(seed)
+
+        output = args.pipe(prompts, generator= generator, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True, apply_var_method_uc=apply_var_method_uc)
+
+        images1 = output[0].images
+        uncertainty_maps = output[1]["uncertainty_maps"]
+        latents_lst = output[1]["latents_lst"]
+        if apply_var_method_uc:
+            pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"][9]
+
+        '''for idx in range(len(images1)):
+            print(prompts[idx])
+            images1[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}H1.jpg", quality=95)'''
+
+        
+        
+        timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+
+    
+        n_timesteps = len(timesteps)
+        example_ts = timesteps[0]
+
+        # Number of samples
+        n_cols = len(uncertainty_maps[example_ts])#uncertainty_maps[example_ts][0].shape[0] // 2
+        n_cols = 1 + n_cols
+        last_layer_idx = n_cols - 2  # Last uncertainty map column
+        num_samples = len(images1)
+        masks = prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
+
+        generator = torch.Generator(device="cuda").manual_seed(seed)
+        scheduler = DDIMScheduler.from_config("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
+        new_model = StableDiffusionInpaintPipeline.from_pretrained(
+            "runwayml/stable-diffusion-v1-5",
+            torch_dtype=torch.float16,
+         
+            scheduler = scheduler,
+        ).to("cuda")
+        print(masks[0].shape)
+        output = new_model(prompts, generator= generator, mask_image=torch.stack(masks,dim=0), scheduler=scheduler, strength=0.99, )
+
+        images2 = output[0].images
+
+        resize = T.Resize((256,256))
+
+        for i in range(len(images1)):
+            img1 = resize(images1[i])
+            img2 = resize(images2[i])
+
+            # mask -> convert to PIL (0-255), apply colormap
+            mask = masks[i].squeeze()  # 1,64,64 -> 64,64
+            mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8)  # normalize
+            mask = cm.hot(mask.cpu().numpy())[:, :, :3]  # apply 'hot' colormap, drop alpha
+            mask = Image.fromarray((mask * 255).astype('uint8')).resize((256,256))
+
+            # concat horizontally: [img1 | mask | img2]
+            strip = Image.new("RGB", (256*3,256))
+            strip.paste(img1, (0,0))
+            strip.paste(mask, (256,0))
+            strip.paste(img2, (512,0))
+
+            strip.save(f"{args.output_dir_demo}/output{start_idx+i}H1.jpg", quality=95)
+        exit(1)
+
+
+       
+        '''for idx in range(len(images)):
+            print(prompts[idx])
+            images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}H2.jpg", quality=95)
+            if apply_var_method_uc:
+                #summed = sum(pixel_wise_uncertainty_lst)
+                #print(summed.shape)
+                
+                heatmap = stacked_pixel_wise_uncertainty_lst[idx] #summed.sum(dim=1)[0]
+                plt.imshow(heatmap.detach().cpu().numpy(), cmap="hot")   # if you really need 'chot', use: cmap="hot"
+                plt.axis('off')
+                plt.savefig(f"{args.output_dir_demo}/output{start_idx+idx}H.jpg", bbox_inches='tight', pad_inches=0)
+                plt.close()'''
+
+
+        
+        '''plot_uncertintiy_maps(
+            uncertainty_maps, 
+            images,
+            prompts,
+            out_dir = args.output_dir_demo,
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            culumative = True,
+            dpi=150)'''
+        
+        
+
+
+
+
 def demo(args):
     deterministic(2024)
     apply_var_method_uc = False
@@ -100,7 +232,16 @@ def demo(args):
         
         
         prompts = [item["caption_0"] for item in dataset]
+
+
+        output = args.pipe(prompts)
+        images = output[0]
+        for idx in range(len(images)):
+            print(prompts[idx])
+            images[idx].save(f"{args.output_dir_demo}/output{start_idx+idx}.jpg", quality=95)
     
+        
+        exit(1)
         output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True, apply_var_method_uc=apply_var_method_uc)
 
         images = output[0].images
@@ -165,6 +306,154 @@ def demo(args):
 
 
 
+def qualitative(args):
+    deterministic(2024)
+    apply_var_method_uc = True
+
+    modelRAHF = RAHF()
+    ckpt_path = 'artifacts_heatmap_generator/RichHF/rahf_model.pt'
+    modelRAHF.load_state_dict(torch.load(ckpt_path, map_location='cpu'))
+    modelRAHF.eval()
+   
+    for start_idx in range(0, 16, args.batch_size):
+        dataset = load_dataset("jxie/flickr8k", split=f"validation[{start_idx}:{start_idx+args.batch_size}]", trust_remote_code=True)  # take 5 examples for demo
+        
+        
+        prompts = [item["caption_0"] for item in dataset]
+    
+        output = args.pipe(prompts, apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True, apply_var_method_uc=apply_var_method_uc)
+
+        images = output[0].images
+
+        
+
+        
+        uncertainty_maps = output[1]["uncertainty_maps"]
+        latents_lst = output[1]["latents_lst"]
+        if apply_var_method_uc:
+            pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"][9]
+
+        
+        stacked_pixel_wise_uncertainty_lst = torch.stack(pixel_wise_uncertainty_lst, dim=1).sum(dim=1).sum(dim=1) 
+       
+        saved_image_paths = []
+        for idx in range(len(images)):
+            print(prompts[idx])
+            images[idx].save(f"{args.qualitative}/output{start_idx+idx}.jpg", quality=95)
+            saved_image_paths.append(f"{args.qualitative}/output{start_idx+idx}.jpg")
+            if apply_var_method_uc:
+                #summed = sum(pixel_wise_uncertainty_lst)
+                #print(summed.shape)
+                
+                heatmap = torch.abs(stacked_pixel_wise_uncertainty_lst[idx]) #summed.sum(dim=1)[0]
+
+                save_overlay(
+                    image_pil=images[idx],
+                    heatmap=heatmap,
+                    out_path=f"{args.qualitative}/output{start_idx+idx}_var_overlay.jpg",
+                    alpha=0.45,
+                    cmap="hot",
+                )
+
+                #plt.imshow(heatmap.detach().cpu().numpy(), cmap="hot")   # if you really need 'chot', use: cmap="hot"
+                #plt.axis('off')
+                #plt.savefig(f"{args.qualitative}/output{start_idx+idx}_var.jpg", bbox_inches='tight', pad_inches=0)
+                #plt.close()
+
+        image_rahf = torch.stack([preprocess_image(im) for im in saved_image_paths])
+        
+
+        outRAHF = modelRAHF(image_rahf.squeeze(1), prompts)
+        heatmaps_batch = outRAHF.pop('heatmaps')
+        heatmaps_batch = heatmaps_batch['implausibility']
+        
+        for idx in range(len(images)):
+            save_overlay(
+                image_pil=images[idx],
+                heatmap=heatmaps_batch[idx].detach(),
+                out_path=f"{args.qualitative}/output{start_idx+idx}_sup_overlay.jpg",
+                alpha=0.45,
+                cmap="hot",
+            )
+        
+        timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+
+    
+        n_timesteps = len(timesteps)
+        example_ts = timesteps[0]
+
+        # Number of samples
+        n_cols = len(uncertainty_maps[example_ts])#uncertainty_maps[example_ts][0].shape[0] // 2
+        n_cols = 1 + n_cols
+        last_layer_idx = n_cols - 2  # Last uncertainty map column
+        num_samples = len(images)
+        masks = prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
+
+        for idx in range(len(images)):
+            save_overlay(
+                image_pil=images[idx],
+                heatmap=masks[idx],
+                out_path=f"{args.qualitative}/output{start_idx+idx}_cumperc_overlay.jpg",
+                alpha=0.45,
+                cmap="hot",
+            )
+
+        #print(len(masks))
+        #print(masks[0].shape)
+        ASCED_masks =   get_artifact_mask(
+                            torch.stack(latents_lst[10:24], dim=1),
+                            mad_scale= 3,
+                            min_area = 4,
+                            max_area = 5000,
+                            min_width = 1,
+                            expand_size = 0,
+                            agg_type = "sum",
+                            return_map = True
+                        )
+        for idx in range(len(images)):
+            save_overlay(
+                image_pil=images[idx],
+                heatmap=ASCED_masks[idx],
+                out_path=f"{args.qualitative}/output{start_idx+idx}_asced_overlay.jpg",
+                alpha=0.45,
+                cmap="hot",
+            )
+              
+        '''plot_uncertintiy_maps(
+            uncertainty_maps, 
+            images,
+            prompts,
+            out_dir = args.output_dir_demo,
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            culumative = True,
+            dpi=150)'''
+        
+        '''plot_ASCD(
+            latents_lst, 
+            images,
+            prompts,
+            uncertainty_maps,
+            out_dir = f"{args.output_dir_demo}/ASCD",
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            dpi=150)'''
+
+        '''plot_ASCD(
+            latents_lst, 
+            images,
+            prompts,
+            uncertainty_maps,
+            out_dir = f"{args.output_dir_demo}/ASCD_OURS",
+            target_size=128,
+            cmap="hot",
+            start_idx = start_idx,
+            dpi=150,
+            ours = True)'''
+
+
 
 
 
@@ -177,7 +466,7 @@ def compare_methods(args):
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
     
-    #subdirs = subdirs[:10000]
+    #subdirs = subdirs[:100]
     images_path = []
     for idx, subdir in enumerate(subdirs):
 
@@ -209,8 +498,31 @@ def compare_methods(args):
         "compare_vis_dir": args.output_vis_dir_compare
 
     }
+
+    '''print(all_unmaps[2])
+    latents_to_load = [torch.load(elem) for elem in all_unmaps[2]]
+    print(latents_to_load[0].shape)
+    import matplotlib.pyplot as plt
+    plt.imshow(latents_to_load[3].cpu(), cmap='hot')
+    plt.colorbar()
+    plt.savefig("tmp/heatmap.png", dpi=150)
+    plt.close()
+    exit(1)'''
+
+
+
+    if args.vis_score_dist:
+         eval_metrics_for_methods((all_unmaps, all_latents, time_steps_sorted), 
+                                    args.methods_eval, 
+                                    compare_mode = args.compare_mode, 
+                                    dirs_dict   = dirs_dict ,
+                                    resize_fid   = args.resize_fid,
+                                    calc_clipscore = args.calc_clipscore,
+                                    vis_score_dist = True
+                                    )       
+
     
-    if args.compare_vis:
+    elif args.compare_vis:
         vis_metrics_for_methods((all_unmaps, all_latents, time_steps_sorted), 
                                 args.methods_eval, 
                                 compare_mode = args.compare_mode, 
@@ -252,13 +564,25 @@ def generate_uncertaintity_samples(args):
     sample_idx = 0
     flag_cant_resume = True
     for batch_start in range(0, len(dataset), args.batch_size):
-        #if flag_cant_resume:
-        #    output_dir_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size))
-        #    if os.path.isdir(output_dir_to_check):
-        #        sample_idx+= args.batch_size
-        #        continue 
-        #    else:
-        #        flag_cant_resume = False
+        if flag_cant_resume:
+            
+            if args.generate_var_uc_scores:
+                output_file_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size),"var_uc.json" )
+                if os.path.isfile(output_file_to_check):
+                    print(output_file_to_check)
+                    sample_idx+= args.batch_size
+                    continue 
+                else:
+                    flag_cant_resume = False
+            else:
+                output_dir_to_check = os.path.join(args.output_dir, str(batch_start+args.batch_size))
+                if os.path.isdir(output_dir_to_check):
+                    sample_idx+= args.batch_size
+                    continue 
+                else:
+                    flag_cant_resume = False
+        
+        
         batch_end = min(batch_start + args.batch_size, len(dataset))
         batch_items = dataset[batch_start:batch_end]
         
@@ -345,6 +669,63 @@ def generate_uncertaintity_samples(args):
     
 
 
+def eval_var_uc(args):
+    generated_dataset_dir = args.output_dir
+    real_dataset_dir = args.real_dataset_dir
+    
+
+
+    subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
+                    key=lambda x: int(x))
+    
+    #subdirs = subdirs[:100]
+    
+    
+    segments = range(11)
+    for seg in segments:
+        sample_score_mapper = {}
+        method = f"VARUC_{seg}"
+        
+        final_output_dir = f"{args.output_dir_compare}/{method}"
+        if check_results_exists(args.output_dir_compare, method) == True:
+            continue
+
+        print(final_output_dir)
+        for idx, subdir in enumerate(subdirs):
+
+            subdir_path = os.path.join(args.output_dir, subdir)
+            
+            with open(f"{subdir_path}/var_uc.json", "r") as f:
+                data = json.load(f)
+            
+            sample_score_mapper[idx] = data[str(seg)]
+            
+        sorted_file_indices = sorted(sample_score_mapper, key=sample_score_mapper.get, reverse=True)
+
+        sorted_file_indices = sorted_file_indices[int(0.16 * len(sorted_file_indices)):]
+        
+        
+        d_res = {}
+        fid_res = compute_fid_custom(generated_dataset_dir, real_dataset_dir, file_indices=sorted_file_indices)
+        prec_rec_res = calculate_metrics(
+            real_folder=real_dataset_dir,
+            gen_folder=generated_dataset_dir,
+            nhood_size=3,
+            batch_size=32,
+            file_indices = sorted_file_indices
+        )
+
+        d_res["precision"] = prec_rec_res["precision"]
+        d_res["recall"] = prec_rec_res["recall"]
+        d_res["fid"] = fid_res
+
+        update_json(f"{final_output_dir}/res.json", d_res)
+        
+        
+
+
+
+
 def collate_fn_heatmap_eval(batch):
     image_paths = [item['image_path'] for item in batch]
     images = torch.stack([item['image'] for item in batch])
@@ -410,7 +791,9 @@ def generate_eval_heatmaps(args):
 if __name__ == "__main__":
     args          = parse_args()
     set_config(args,gen_samples = (args.mode == "generate_uncertaintity_samples"))
-    if args.mode == "demo":
+    if args.demo_correct:
+        demo_correct(args)
+    elif args.mode == "demo":
         demo(args)
     elif args.mode == "generate_uncertaintity_samples":
         generate_uncertaintity_samples(args)
@@ -421,7 +804,10 @@ if __name__ == "__main__":
         compare_methods(args)
     elif args.mode == "analyze_compare_methods":
         analyze_compare_methods(args)
-
+    elif args.mode == "eval_var_uc":
+        eval_var_uc(args)
+    elif args.mode == "qualitative":
+        qualitative(args)
 '''
 # Convert PIL images to tensors for CLIPScore
 preprocess = transforms.Compose([
