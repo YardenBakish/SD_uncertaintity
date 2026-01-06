@@ -340,7 +340,11 @@ def generate_special_batch_map_globalTimestep(latents_batch, agg_type, model_pat
     
     # Apply absolute value to accumulated maps
     accumulated = torch.abs(accumulated)
-    result = accumulated.sum(dim=(1, 2))
+    if "MAX" in agg_type:
+        result = accumulated.amax(dim=(1, 2))
+
+    else:
+        result = accumulated.sum(dim=(1, 2))
 
    
     return result, accumulated
@@ -530,6 +534,7 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
                 agg_type = agg_type,
             )
             for i, sample_idx in enumerate(indices.tolist()):
+                #print(scores[i].item())
                 uncertaintity_maps_dict[sample_idx] = scores[i].item()
             
 
@@ -540,29 +545,36 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
             import matplotlib.pyplot as plt
             output_vis_dir = dirs_dict["compare_vis_dir"]
             values = list(uncertaintity_maps_dict.values())
+
+            print(min(values))
+            print(max(values))
+
             mean_val = np.mean(values)
+            print(mean_val)
             std_val  = np.std(values)
 
             #threshold = mean_val + std_val
             #count_above = np.sum(values > threshold)
             
             # Plot
-            plt.hist(values, bins='auto', edgecolor='black', linewidth=0.5)
-            plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f"μ = {mean_val:.6f}")
+            plt.hist(values, bins='auto',density=True,  edgecolor='black', linewidth=0.5)
+            plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=r"$\mu$")
+
             #plt.axvline(mean_val + std_val, color='blue', linestyle='--', linewidth=1.5, label=f"μ + σ = {mean_val+std_val:.6f}")
             #plt.axvline(mean_val - std_val, color='green', linestyle='--', linewidth=1.5, label=f"μ - σ = {mean_val-std_val:.6f}")
 
             plt.xticks(
                 [mean_val - std_val, mean_val, mean_val + std_val],
-                [f"μ - σ\n{mean_val-std_val:.6f}", f"μ\n{mean_val:.6f}", f"μ + σ\n{mean_val+std_val:.6f}"]
+                [r"$\mu - \sigma$", r"$\mu$", r"$\mu + \sigma$"]
             )
 
             #plt.xlabel("Value (μ = mean)")  # shows μ on the x-axis label
-            plt.ylabel("Frequency")
+            plt.ylabel("Density")
             plt.title("Value Distribution")
-            plt.legend()
+            #plt.legend()
             plt.savefig(f"{output_vis_dir}/dist_{method}.jpg", dpi=300, bbox_inches="tight")
             plt.show()
+            exit(1)
             
             return
 

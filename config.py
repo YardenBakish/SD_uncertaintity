@@ -3,8 +3,9 @@ import torch
 from diffusers import DDIMScheduler
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from modules.pipeline_stable_xl_diffusion import StableDiffusionXLPipeline
+from modules.pipeline_pixart_sigma import PixArtSigmaPipeline
 from datasets import Dataset
-from diffusers import PixArtSigmaPipeline
+#from diffusers import PixArtSigmaPipeline
 from torchmetrics.multimodal import CLIPScore
 from PIL import Image
 from datasets import load_dataset
@@ -51,6 +52,8 @@ METHODS_EVAL = {
        
     }
 }
+
+
 
 def set_config(args, gen_samples = False):
     if gen_samples:
@@ -117,8 +120,7 @@ def set_config(args, gen_samples = False):
             use_safetensors=True,
         ).to("cuda")
 
-        print(args.pipe)
-        exit(1)
+        
 
         
         args.batch_size = 2
@@ -131,6 +133,16 @@ def set_config(args, gen_samples = False):
     if args.mode == "compare_methods":
         args.methods_eval = METHODS_EVAL
 
+
+        if args.compare_vis:
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            args.methods_eval["methods"]["globalTimestep"] = True
+            args.methods_eval['global_agg_calculation'] = ["prWeighted", "pr"]
+            args.methods_eval["global_start_indices"] = [12]
+            args.methods_eval["global_end_indices"] = [-5]
+
+
         if args.use_global:
             for method in args.methods_eval["methods"]:
                 args.methods_eval["methods"][method] = False
@@ -142,10 +154,16 @@ def set_config(args, gen_samples = False):
             args.methods_eval["timesteps_basic"] = ["441","921","881","841", ]
             for method in args.methods_eval["methods"]:
                 args.methods_eval["methods"][method] = False
-            args.methods_eval["methods"]["perTimestep"] = True
+            
+            args.methods_eval['global_agg_calculation'] = ["prWeighted"]
+            #args.methods_eval["methods"]["globalTimestep"] = True
             args.methods_eval["methods"]["ASCEDLatent"] = True
-            args.methods_eval["agg_calculation"] = ["sum"]
-
+            args.methods_eval["global_start_indices"] = [3]
+            args.methods_eval["global_end_indices"] = [-5]
+            
+            args.methods_eval["MAD_values"] = [3]
+            args.methods_eval["MAD_start_indices"] = [10]
+            args.methods_eval["MAD_end_indices"] = [24]
 
 
 

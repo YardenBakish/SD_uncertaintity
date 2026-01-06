@@ -58,6 +58,8 @@ if __name__ == "__main__":
     to_remove = set(random.sample(indices, n_remove))  # pick exactly 16% randomly
     filtered = [x for x in indices if x not in to_remove]
 
+   
+
     for fake_dir in gen_folders:
         fid_score = compute_fid_custom(fake_dir, real_dir,file_indices = filtered)
         print(f"FID: {fid_score:.4f}")

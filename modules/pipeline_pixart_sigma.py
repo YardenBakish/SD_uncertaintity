@@ -21,10 +21,10 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 from transformers import T5EncoderModel, T5Tokenizer
 
-from ...image_processor import PixArtImageProcessor
-from ...models import AutoencoderKL, PixArtTransformer2DModel
-from ...schedulers import KarrasDiffusionSchedulers
-from ...utils import (
+from diffusers.image_processor import PixArtImageProcessor
+from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
+from diffusers.schedulers import KarrasDiffusionSchedulers
+from diffusers.utils import (
     BACKENDS_MAPPING,
     deprecate,
     is_bs4_available,
@@ -33,9 +33,9 @@ from ...utils import (
     logging,
     replace_example_docstring,
 )
-from ...utils.torch_utils import randn_tensor
-from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
-from .pipeline_pixart_alpha import (
+from diffusers.utils.torch_utils import randn_tensor
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_1024_BIN,

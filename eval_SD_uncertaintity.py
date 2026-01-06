@@ -40,7 +40,8 @@ def parse_args():
                                                                          'compare_methods', 
                                                                          'analyze_compare_methods',
                                                                          'eval_var_uc',
-                                                                         'qualitative'])
+                                                                         'qualitative',
+                                                                         'playground'])
     parser.add_argument('--model', type=str, default = '1.5v', choices = ['1.5v', 'SDXL', 'PixArt'])
 
 
@@ -308,7 +309,7 @@ def demo(args):
 
 def qualitative(args):
     deterministic(2024)
-    apply_var_method_uc = True
+    apply_var_method_uc = False
 
     modelRAHF = RAHF()
     ckpt_path = 'artifacts_heatmap_generator/RichHF/rahf_model.pt'
@@ -331,10 +332,10 @@ def qualitative(args):
         uncertainty_maps = output[1]["uncertainty_maps"]
         latents_lst = output[1]["latents_lst"]
         if apply_var_method_uc:
-            pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"][9]
+            pixel_wise_uncertainty_lst = output[1]["pixel_wise_uncertainty_lst"][11]
 
         
-        stacked_pixel_wise_uncertainty_lst = torch.stack(pixel_wise_uncertainty_lst, dim=1).sum(dim=1).sum(dim=1) 
+            stacked_pixel_wise_uncertainty_lst = torch.stack(pixel_wise_uncertainty_lst, dim=1).sum(dim=1).sum(dim=1) 
        
         saved_image_paths = []
         for idx in range(len(images)):
@@ -351,8 +352,9 @@ def qualitative(args):
                     image_pil=images[idx],
                     heatmap=heatmap,
                     out_path=f"{args.qualitative}/output{start_idx+idx}_var_overlay.jpg",
-                    alpha=0.45,
+                    alpha=0.75,
                     cmap="hot",
+                    target_size = 512 if args.model == "1.5v" else 1024
                 )
 
                 #plt.imshow(heatmap.detach().cpu().numpy(), cmap="hot")   # if you really need 'chot', use: cmap="hot"
@@ -360,9 +362,7 @@ def qualitative(args):
                 #plt.savefig(f"{args.qualitative}/output{start_idx+idx}_var.jpg", bbox_inches='tight', pad_inches=0)
                 #plt.close()
 
-        image_rahf = torch.stack([preprocess_image(im) for im in saved_image_paths])
-        
-
+        """image_rahf = torch.stack([preprocess_image(im) for im in saved_image_paths])
         outRAHF = modelRAHF(image_rahf.squeeze(1), prompts)
         heatmaps_batch = outRAHF.pop('heatmaps')
         heatmaps_batch = heatmaps_batch['implausibility']
@@ -372,9 +372,10 @@ def qualitative(args):
                 image_pil=images[idx],
                 heatmap=heatmaps_batch[idx].detach(),
                 out_path=f"{args.qualitative}/output{start_idx+idx}_sup_overlay.jpg",
-                alpha=0.45,
+                alpha=0.75,
                 cmap="hot",
-            )
+                target_size = 512 if args.model == "1.5v" else 1024
+            )"""
         
         timesteps = sorted(uncertainty_maps.keys(), reverse=True)
 
@@ -387,15 +388,16 @@ def qualitative(args):
         n_cols = 1 + n_cols
         last_layer_idx = n_cols - 2  # Last uncertainty map column
         num_samples = len(images)
-        masks = prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
+        masks = prepare_culumative(num_samples, last_layer_idx, uncertainty_maps, timesteps)
 
         for idx in range(len(images)):
             save_overlay(
                 image_pil=images[idx],
                 heatmap=masks[idx],
                 out_path=f"{args.qualitative}/output{start_idx+idx}_cumperc_overlay.jpg",
-                alpha=0.45,
+                alpha=0.75,
                 cmap="hot",
+                target_size = 512 if args.model == "1.5v" else 1024
             )
 
         #print(len(masks))
@@ -415,10 +417,11 @@ def qualitative(args):
                 image_pil=images[idx],
                 heatmap=ASCED_masks[idx],
                 out_path=f"{args.qualitative}/output{start_idx+idx}_asced_overlay.jpg",
-                alpha=0.45,
+                alpha=0.75,
                 cmap="hot",
+                target_size = 512 if args.model == "1.5v" else 1024
             )
-              
+        exit(1)     
         '''plot_uncertintiy_maps(
             uncertainty_maps, 
             images,
@@ -455,8 +458,6 @@ def qualitative(args):
 
 
 
-
-
 def compare_methods(args):
     all_unmaps = []
     all_latents = []
@@ -466,7 +467,7 @@ def compare_methods(args):
     subdirs = sorted([d for d in os.listdir(args.output_dir) if os.path.isdir(os.path.join(args.output_dir, d))], 
                     key=lambda x: int(x))
     
-    #subdirs = subdirs[:100]
+    #subdirs = subdirs[:10000]
     images_path = []
     for idx, subdir in enumerate(subdirs):
 
@@ -549,7 +550,7 @@ def compare_methods(args):
 
 def analyze_compare_methods(args):
     
-    collect_and_merge_results(args.output_dir_compare)
+    #collect_and_merge_results(args.output_dir_compare)
     print_stats(args.output_dir_compare)
     exit(1)
 
@@ -681,7 +682,7 @@ def eval_var_uc(args):
     #subdirs = subdirs[:100]
     
     
-    segments = range(11)
+    segments = range(12)
     for seg in segments:
         sample_score_mapper = {}
         method = f"VARUC_{seg}"
@@ -808,6 +809,10 @@ if __name__ == "__main__":
         eval_var_uc(args)
     elif args.mode == "qualitative":
         qualitative(args)
+    elif args.mode == "playground":
+        playground(args)
+
+
 '''
 # Convert PIL images to tensors for CLIPScore
 preprocess = transforms.Compose([
