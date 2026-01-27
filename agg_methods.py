@@ -2,7 +2,7 @@ import torch
 #from diffusers import StableDiffusionPipeline
 
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
-from torchmetrics.multimodal import CLIPScore
+#from torchmetrics.multimodal import CLIPScore
 from PIL import Image
 from datasets import load_dataset
 from modules.unet_2D_conditioned import UNet2DConditionModel

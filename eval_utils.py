@@ -2,7 +2,7 @@ import torch
 #from diffusers import StableDiffusionPipeline
 
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
-from torchmetrics.multimodal import CLIPScore
+#from torchmetrics.multimodal import CLIPScore
 from PIL import Image
 from datasets import load_dataset
 from modules.unet_2D_conditioned import UNet2DConditionModel
@@ -14,10 +14,13 @@ import json
 import matplotlib.pyplot as plt
 from agg_methods import  compute_frame_differences #,get_artifact_mask # 
 #from agg_experiments import  get_artifact_mask
+from scipy.ndimage import median_filter
+from matplotlib.patches import Rectangle
 
-from agg_experiments import generate_map_wrapper
+from agg_experiments import generate_map_wrapper, otsu_threshold
 from artifacts_heatmap_generator.RichHF.model import  preprocess_image, RAHF
 from diffusers import DDIMScheduler
+from matplotlib.colors import LinearSegmentedColormap
 
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -263,27 +266,47 @@ def prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps,
 
     #weights = weights / weights.sum()
     #print(weights)
-    start_idx = 12
-    masks = []
     print(len(timesteps))
+    if len(timesteps) == 50:
+        start_idx = 12
+        end_idx = 5
+    else:
+        start_idx = 12
+        end_idx = 3
+    masks = []
+    
     timesteps = timesteps[start_idx:]
     for sample_idx in range(num_samples):
         for map_idx in range(2):
             differences = []
             for idx, ts in enumerate(timesteps):
-                if idx == len(timesteps) -5:
+                if idx == len(timesteps) -end_idx:
                     break
+                #use torch.abs here
                 uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx]
                 threshold = torch.quantile(uncertainty.float(), 0.95)
                 mask = uncertainty > threshold
                 filtered = uncertainty * mask 
                 
-                uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] += (filtered * weights[ts]) #(weights[ts] * (uncertainty_next - uncertainty))
+                uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] += (filtered) # weights[ts] * ( (uncertainty_next - uncertainty))
             
+            #HERE dont use
             uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx] = torch.abs(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
             if map_idx == 0:
-                masks.append(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx])
+                #print(uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx].shape)
+                curr_map = uncertainty_maps[timesteps[0]][last_layer_idx].chunk(2)[map_idx][sample_idx]
+                heatmap_np = curr_map.squeeze().float().cpu().numpy()
+                curr_map = median_filter(heatmap_np, size=3)
+                #curr_map = torch.from_numpy(cleaned).unsqueeze(0)
+                #mean_val = torch.quantile(curr_map.float(), 0.9)
+                #curr_map[curr_map < mean_val] = 0
+                masks.append(curr_map)
     return masks
+
+
+
+
+
 
 def plot_uncertintiy_maps(
     uncertainty_maps, 
@@ -295,6 +318,50 @@ def plot_uncertintiy_maps(
     start_idx = 0,
     culumative = False,
     dpi=150):
+
+    tmp_mapper = {
+        2: [301, 521,],
+        4: [361,481],
+        5:[681,261],
+        6:[261,761],
+        13: [481,541],
+        15: [461, 381],
+        7:  [341, 701,], 
+       
+    }
+
+    '''
+    6: [601, 241],
+     5:[381,241],
+    5: [681, 241],
+    1: [521,661,],
+    2: [301, 521,],
+
+
+    7:  [341, 701,],   #681,
+    8: [281, 681,],
+    14: [461, 521, ],   #521, 
+    16: [321, 641, ],   #521, '''
+
+
+    OVERLAY_TIMESTEPS = [521,  321, 101] #321, 524, 
+    USE_LAY = False
+    # Define colors for each timestep (distinct colors)
+    OVERLAY_COLORS = [
+        (1.0, 0.0, 0.0, 1.0),    # Red
+        #(0.0, 1.0, 0.0, 0.6),    # Green
+        (0.0, 0.0, 1.0, 1.0),    # Blue
+        (1.0, 1.0, 0.0, 1.0),    # Yellow
+        #(1.0, 0.0, 1.0, 0.45),    # Magenta
+    ]
+
+    OVERLAY_COLORS = [
+        np.array([0.9, 0.6, 0.1,1.0]),    # Red
+        #(0.0, 1.0, 0.0, 0.6),    # Green
+        np.array([0.1, 0.6, 0.9,1.0]),    # Blue
+        #(1.0, 1.0, 0.0, 1.0),    # Yellow
+        #(1.0, 0.0, 1.0, 0.45),    # Magenta
+    ]
 
     os.makedirs(out_dir, exist_ok=True)
     timesteps = sorted(uncertainty_maps.keys(), reverse=True)
@@ -317,6 +384,10 @@ def plot_uncertintiy_maps(
         prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
 
     for sample_idx in range(num_samples):
+        print(sample_idx+ start_idx)
+        print(sample_idx+ start_idx not in tmp_mapper)
+        if sample_idx+ start_idx not in tmp_mapper and USE_LAY:
+            continue
         if False: #vis by layer
             for map_idx in range(2):
             
@@ -379,6 +450,200 @@ def plot_uncertintiy_maps(
                 plt.savefig(os.path.join(out_dir, f'{vis_file_name}'), dpi=150, bbox_inches='tight')
                 plt.close()
 
+        if USE_LAY:
+            debug_dir = os.path.join(out_dir, "debug_single_maps")
+            for map_idx in range(2):  # uncond and cond
+                fig, ax = plt.subplots(figsize=(10, 10))
+                
+                # Display the original image
+                img_resized = torch.nn.functional.interpolate(
+                    torch.from_numpy(np.array(images[sample_idx])).permute(2, 0, 1).unsqueeze(0).float(),
+                    size=(512, 512),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze().permute(1, 2, 0).numpy().astype(np.uint8)
+                
+                #alpha = 0.3  # Adjust this (0.2-0.4) - higher = darker
+                img_blended = img_resized #(img_resized * (1 - alpha) + 0 * alpha).astype(np.uint8)
+                
+                ax.imshow(img_blended)
+                combined_overlay = np.zeros((512, 512, 3), dtype=np.float32)
+
+
+                occupied_mask = torch.zeros((512, 512), dtype=bool)
+                # Overlay uncertainty maps for selected timesteps
+                
+                for color_idx, ts in enumerate(tmp_mapper[start_idx+sample_idx]):
+                    if ts not in uncertainty_maps:
+                        continue
+                    
+
+                    uncertainty = uncertainty_maps[ts][last_layer_idx].chunk(2)[map_idx][sample_idx].squeeze(0)
+                    
+                    # Resize to 256x256
+                    uncertainty_resized = torch.nn.functional.interpolate(
+                        uncertainty.unsqueeze(0).unsqueeze(0),
+                        size=(512, 512),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze()
+                    
+                    # Calculate 95th percentile threshold
+                    #uncertainty_resized = (uncertainty_resized - uncertainty_resized.min()) / (uncertainty_resized.max() - uncertainty_resized.min())
+                    #print(uncertainty_resized.shape)
+                    #exit(1)
+                    #print(uncertainty_resized.dtype)
+                    #exit(1)
+
+
+
+                    overlay = np.zeros((512, 512, 4))
+                    color = OVERLAY_COLORS[color_idx % len(OVERLAY_COLORS)]
+
+                    base_color = color  # example: blue
+
+                    light_color = base_color
+                    mid_color = base_color
+                    hard_color = base_color
+                    #print(light_color.shape)
+                    #exit(1)
+                    light_color[...,3]*= 0.2
+                    mid_color[...,3]*= 0.6
+                    hard_color[...,3]*= 1.2
+
+
+                    cmap = LinearSegmentedColormap.from_list(
+                        "mono_color",
+                        [
+                            base_color * 0.2,          # dark / low
+                            base_color * 0.6,          # mid
+                            np.clip(hard_color , 0, 1),  # bright / high
+                        ]
+                    )
+
+                    if True:
+                        #uncertainty_resized = uncertainty_resized.pow(0.5)
+                        alpha_normalized = (uncertainty_resized - uncertainty_resized.min()) / (uncertainty_resized.max() - uncertainty_resized.min())
+                        
+                        alpha_normalized = alpha_normalized
+                        #alpha_map = alpha_normalized * 0.8 + 0.1 #+ 0.3  # Range [0.3, 0.7]
+                        #mask_np = np.ones_like(uncertainty_resized.numpy()) 
+                        #overlay[:,:, :3] = color[:3]  # RGB
+                        #overlay[:,:, 3] = (alpha_map).numpy()  # Alpha
+
+                        print(combined_overlay.shape)
+                        print(alpha_normalized.shape)
+
+                        overlay_intensity = np.max(combined_overlay, axis=2) 
+
+                        occupied_mask = overlay_intensity > 0.5
+
+                        occupied_mask_torch = torch.from_numpy(occupied_mask)
+
+                        alpha_normalized[occupied_mask_torch] = 0
+
+                        color = OVERLAY_COLORS[color_idx % len(OVERLAY_COLORS)]
+                                    
+                                    # Add this heatmap's contribution to the combined overlay
+                                    # Each pixel accumulates color weighted by uncertainty
+                        combined_overlay += (alpha_normalized.numpy()[:, :, None] * color[:3])
+                        # Display overlay
+                        #ax.imshow(uncertainty_resized.numpy(), cmap = cmap, alpha=0.7)
+
+                    else:
+                        threshold = torch.quantile(uncertainty_resized, 0.97) # otsu_threshold(uncertainty_resized) #  #  #  # #    
+                        
+                        # Create binary mask for top 5% values
+                        high_uncertainty_mask = uncertainty_resized >= threshold
+                        high_uncertainty_mask &= ~occupied_mask
+                        occupied_mask |= high_uncertainty_mask
+                    
+
+                        
+                        #overlay[high_uncertainty_mask.numpy()] = color
+                        
+                        # Get uncertainty values only in the masked region
+                        masked_uncertainty = uncertainty_resized.clone()
+                        masked_uncertainty[~high_uncertainty_mask] = 0
+                        
+                        # Normalize the masked region to [0, 1] for alpha mapping
+                        # This creates a linear gradient from threshold (transparent) to max (semi-opaque)
+                        region_values = masked_uncertainty[high_uncertainty_mask]
+                        min_val = region_values.min()
+                        max_val = region_values.max()
+                        
+                        # Avoid division by zero
+                        if max_val > min_val:
+                            # Map from [threshold, max] to [0.3, 0.7] alpha range
+                            alpha_normalized = (masked_uncertainty - min_val) / (max_val - min_val)
+                            alpha_map = alpha_normalized * 0.5 + 0.2 #+ 0.3  # Range [0.3, 0.7]
+                        else:
+                            alpha_map = torch.ones_like(masked_uncertainty) * 0.5
+                        
+                        # Apply color and alpha
+                        mask_np = high_uncertainty_mask.numpy()
+                        overlay[mask_np, :3] = color[:3]  # RGB
+                        overlay[mask_np, 3] = (alpha_map[high_uncertainty_mask]).numpy()  # Alpha
+
+
+                        # Display overlay
+                        ax.imshow(overlay)
+                        
+                        # Find regions to place labels (using connected components)
+                        from scipy import ndimage
+                        labeled_array, num_features = ndimage.label(high_uncertainty_mask.numpy())
+                        
+                        # For each connected component, place a label
+                        for region_id in range(1, min(num_features + 1, 2)):  # Limit to 3 labels per timestep
+                            region_mask = labeled_array == region_id
+                            region_size = region_mask.sum()
+                            
+                            # Only label reasonably sized regions
+                            #if region_size < 50:
+                            #    continue
+                            
+                            # Find centroid of region
+                            coords = np.argwhere(region_mask)
+                            centroid_y, centroid_x = coords.mean(axis=0)
+                            
+                            # Place label with semi-transparent black box
+                            text_color = OVERLAY_COLORS[color_idx % len(OVERLAY_COLORS)][:3]  # RGB only
+                            
+                            # Create text box
+                            bbox_props = dict(boxstyle='round,pad=0.5', 
+                                            facecolor='black', 
+                                            alpha=0.7, 
+                                            edgecolor='none')
+                            
+                            ax.text(centroid_x, centroid_y, f't={ts}', 
+                                color=text_color,
+                                fontsize=10,
+                                fontweight='bold',
+                                ha='center',
+                                va='center',
+                                bbox=bbox_props)
+                
+
+                if combined_overlay.max() > 0:
+                    combined_overlay = combined_overlay / combined_overlay.max()
+        
+                # Display the combined overlay
+                ax.imshow(combined_overlay, alpha=0.6)
+                
+                print("REACHED")
+                print(sample_idx+start_idx)
+                map_type = 'uncond' if map_idx == 0 else 'cond'
+                ax.set_title(f'Sample {sample_idx+start_idx} - {map_type.upper()} - Top 5% Uncertainty Overlay', 
+                            fontsize=14, fontweight='bold')
+                ax.axis('off')
+                
+                overlay_file_name = f'overlay_sample_{sample_idx+start_idx}_{map_type}.png'
+                plt.savefig(
+                    os.path.join(debug_dir, overlay_file_name),
+                    dpi=dpi,
+                    bbox_inches='tight'
+                )
+                plt.close()
 
         # ------------------
         # Create enlarged visualizations for the last layer
@@ -390,6 +655,8 @@ def plot_uncertintiy_maps(
 
             #import numpy as np
             for map_idx in range(2):
+
+
                 # NEW VISUALIZATION: Grid layout for many timesteps
                 # Calculate grid dimensions
                 grid_cols = int(np.ceil(np.sqrt(n_timesteps + 1)))  # +1 for the image
@@ -434,6 +701,24 @@ def plot_uncertintiy_maps(
                     ).squeeze()
                     
                     im = ax_map.imshow(uncertainty_resized, cmap='hot')
+               
+                    
+                    if False:#sample_idx == 2: #or sample_idx == 2:
+                        uncertainty_resized = (uncertainty_resized - uncertainty_resized.min()) / (uncertainty_resized.max() - uncertainty_resized.min())
+                        debug_dir = os.path.join(out_dir, "debug_single_maps")
+                        os.makedirs(debug_dir, exist_ok=True)
+
+                        fig_dbg, ax_dbg = plt.subplots(figsize=(4, 4))
+                        im_dbg = ax_dbg.imshow(uncertainty_resized, cmap="hot")
+                        #ax_dbg.set_title(f"t = {ts} | {'uncond' if map_idx == 0 else 'cond'}")
+                        ax_dbg.axis("off")
+                        plt.colorbar(im_dbg, ax=ax_dbg, fraction=0.046, pad=0.04)
+
+                        dbg_name = f"sample_{sample_idx}_t{ts}_{'uncond' if map_idx == 0 else 'cond'}.png"
+                        plt.savefig(os.path.join(debug_dir, dbg_name), dpi=dpi, bbox_inches="tight")
+                        plt.close(fig_dbg)
+
+
                     ax_map.set_title(f't = {ts}', fontsize=10, fontweight='bold')
                     ax_map.set_xticks([])
                     ax_map.set_yticks([])
@@ -557,6 +842,12 @@ def save_uncertainty_maps(
     num_samples = int(uncertainty_maps[example_ts][last_layer].shape[0] / 2)
     #print(len(latents_lst))
     #print(latents_lst[0].shape)
+
+    #print(num_samples)
+    #print(timesteps)
+    #print(len(latents_lst))
+    #print(len(latents_lst[0]))
+    #exit(1)
     for sample_idx in range(num_samples):
         for map_idx in range(1):
             for row_idx, ts in enumerate(timesteps):
@@ -617,8 +908,12 @@ class HeatmapEvalDataset(Dataset):
 
   
 
-def check_results_exists(output_dir, method, calc_clipscore=False, skip = False):
+def check_results_exists(output_dir, method, calc_clipscore=False, calc_cmmd = False,calc_sup_metrics =False, calc_grad_fid = False, skip = False):
     
+    if calc_grad_fid:
+        return False
+
+    skip = True #(calc_cmmd == True) or (calc_sup_metrics == True)
     
     global_file = f"{output_dir}/res.json"
     local_dir = f"{output_dir}/{method}"
@@ -1081,7 +1376,7 @@ def vis_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None
     exit(1)
 
 
-def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None, calc_clipscore = False, vis_score_dist = False):
+def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=None,resize_fid=None,  calc_clipscore = False,calc_cmmd = False, calc_sup_metrics = False, calc_grad_fid = False, vis_score_dist = False):
 
     output_dir = dirs_dict["output_dir_compare"]
 
@@ -1103,9 +1398,9 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                         for timestep in methods_dict["timesteps_basic"]:
                             final_method = f"{semi_final_method}_{timestep}"
                             print(final_method)
-                            if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
+                            if check_results_exists(output_dir, final_method, calc_clipscore, calc_cmmd, calc_sup_metrics, calc_grad_fid) == False or vis_score_dist:
                                 
-                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid, calc_clipscore = calc_clipscore, vis_score_dist = vis_score_dist)
+                                generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, compare_mode = compare_mode, resize_fid = resize_fid, calc_clipscore = calc_clipscore,calc_cmmd=calc_cmmd, calc_sup_metrics = calc_sup_metrics, calc_grad_fid=calc_grad_fid, vis_score_dist = vis_score_dist)
 
                     else:
                         #final_method = semi_final_method
@@ -1117,11 +1412,14 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                                 final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}"
                                 
 
-                                if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
+                                if check_results_exists(output_dir, final_method,calc_clipscore,calc_cmmd, calc_sup_metrics, calc_grad_fid) == False or vis_score_dist:
                                     generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
                                     compare_mode = compare_mode, 
                                     resize_fid =resize_fid, 
                                     calc_clipscore = calc_clipscore,
+                                    calc_cmmd = calc_cmmd,
+                                    calc_sup_metrics = calc_sup_metrics,
+                                    calc_grad_fid = calc_grad_fid,
                                     start_timestep = start_idx,
                                     end_timestep = end_idx, 
                                     vis_score_dist = vis_score_dist)
@@ -1139,7 +1437,8 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                             for mad_value in MAD_values:
                                 final_method = f"{method_name}_{agg_calculation}_{method}_{start_idx}${end_idx}${mad_value}"
                                 
-                                if check_results_exists(output_dir, final_method,calc_clipscore) == False or vis_score_dist:
+                               
+                                if check_results_exists(output_dir, final_method,calc_clipscore, calc_cmmd, calc_sup_metrics, calc_grad_fid) == False or vis_score_dist:
                                     generate_map_wrapper(x, final_method, methods_dict, dirs_dict = dirs_dict, 
                                                             compare_mode = compare_mode, 
                                                             resize_fid =resize_fid,
@@ -1148,6 +1447,9 @@ def eval_metrics_for_methods(x, methods_dict, compare_mode = None, dirs_dict=Non
                                                             mad_value = mad_value,
                                                             asced = True,
                                                             calc_clipscore = calc_clipscore,
+                                                            calc_cmmd = calc_cmmd,
+                                                            calc_sup_metrics = calc_sup_metrics,
+                                                            calc_grad_fid  = calc_grad_fid,
                                                             vis_score_dist = vis_score_dist)
 
                 

@@ -1,462 +1,141 @@
-"""
-PUNC (Prompt-based UNCertainty Estimation) Evaluation Implementation
-Based on "Towards Understanding and Quantifying Uncertainty for Text-to-Image Generation"
+def user_study(args):
+    import pandas as pd
+    from datasets import Dataset
 
-This implementation provides:
-- Text-to-Image generation using Stable Diffusion 1.5
-- Image captioning using BLIP-2
-- ROUGE-L and ROUGE-1 (precision/recall) scoring
-- BERTScore (precision/recall) scoring
-- Uncertainty metrics: AUROC, AUPR, FPR95
-"""
+    deterministic(2025)
+    op_captions = 'flicker'
+    modelRAHF = RAHF()
+    ckpt_path = 'artifacts_heatmap_generator/RichHF/rahf_model.pt'
+    modelRAHF.load_state_dict(torch.load(ckpt_path, map_location='cpu'))
+    modelRAHF.eval()
 
-import torch
-import numpy as np
-from diffusers import StableDiffusionPipeline
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
-from rouge_score import rouge_scorer
-from bert_score import score as bert_score
-from tqdm import tqdm
-import json
-from typing import List, Dict, Tuple
-import warnings
-warnings.filterwarnings('ignore')
-from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
+    csv_path = f"{args.user_study}/mapping.csv"
+    csv_file = open(csv_path, "w", newline="")
+    csv_writer = csv.DictWriter(csv_file, fieldnames=["sample_id", "A", "B", "C"])
+    csv_writer.writeheader()
 
-class PUNCEvaluator:
-    """
-    PUNC Evaluator for Text-to-Image Uncertainty Quantification
-    """
+    if op_captions == "coco":
+        coco_dir = "datasets/coco"
+        data_file = f'{coco_dir}/annotations/captions_val2014.json'
+        data = json.load(open(data_file))
+
+        # merge images and annotations
+
+        images = data['images']
+        
+        annotations = data['annotations']
+        df = pd.DataFrame(images)
+        df_annotations = pd.DataFrame(annotations)
+        df = df.merge(pd.DataFrame(annotations), how='left', left_on='id', right_on='image_id')
+
+        # keep only the relevant columns
+        df = df[['file_name', 'caption']]
+
+        # remove duplicate images
+        df = df.drop_duplicates(subset='file_name')
+        
+        dataset = Dataset.from_pandas(df.reset_index(drop=True))
+        dataset = dataset.select(range(30000))
+
+    elif op_captions == "flicker":
+        dataset = load_dataset("jxie/flickr8k", split="validation", trust_remote_code=True) 
     
-    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        """Initialize models for T2I generation and captioning"""
-        self.device = device
-        print(f"Using device: {self.device}")
-        
-        # Load Stable Diffusion 1.5
-        print("Loading Stable Diffusion 1.5...")
-        self.sd_pipe = StableDiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            torch_dtype=torch.float16 if device == 'cuda' else torch.float32,
-            safety_checker=None
-        ).to(device)
-        
-     
-        
-        self.caption_processor = AutoProcessor.from_pretrained(
-            'allenai/Molmo-7B-D-0924',
-            trust_remote_code=True,
-            torch_dtype='auto',
-            device_map='auto'
-        )
-        self.caption_model = AutoModelForCausalLM.from_pretrained(
-                'allenai/Molmo-7B-D-0924',
-                trust_remote_code=True,
-                torch_dtype='auto',
-                device_map='auto'
-            ).to(device)
-        
-        # Initialize ROUGE scorer
-        self.rouge_scorer = rouge_scorer.RougeScorer(
-            ['rouge1', 'rougeL'], 
-            use_stemmer=True
-        )
-        
-        print("All models loaded successfully!")
-
+    else:
+        dataset = PREMAID_DATASET
+    if op_captions:
+        all_dataset = dataset.shuffle(seed=2021)
+    for start_idx in range(0, 10, args.batch_size):
+        if op_captions:
+            dataset = all_dataset.select(
+                                    range(start_idx, start_idx + args.batch_size)
+                                )  # take 5 examples for demo
+                                        
+            if op_captions == "coco":
+                prompts = [item["caption"] for item in dataset]
+            elif op_captions == "flicker":
+                prompts = [item["caption_0"] for item in dataset]
+        else:
+            prompts = PREMAID_DATASET[start_idx: start_idx + args.batch_size]
 
     
-    def generate_image(self, prompt: str, num_inference_steps: int = 50, seed: int = None) -> torch.Tensor:
-        """Generate image from text prompt"""
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
+        output = args.pipe(prompts,  apply_uc = True, apply_uc_on_all_timesteps=True, return_mid_reps = True)
+
+        images = output[0].images
+
+        uncertainty_maps = output[1]["uncertainty_maps"]
+        latents_lst = output[1]["latents_lst"]
+       
+        saved_image_paths = []
+        for idx in range(len(images)):
+            print(prompts[idx])
+            images[idx].save(f"{args.user_study}/output{start_idx+idx}.jpg", quality=95)
+            saved_image_paths.append(f"{args.user_study}/output{start_idx+idx}.jpg")
+            
+
+        #image_rahf = torch.stack([preprocess_image(im) for im in saved_image_paths])
+        #outRAHF = modelRAHF(image_rahf.squeeze(1), prompts)
+        #heatmaps_batch = outRAHF.pop('heatmaps')
+        #heatmaps_batch = heatmaps_batch['implausibility']
         
-        with torch.no_grad():
-            image = self.sd_pipe(
-                prompt,
-                num_inference_steps=num_inference_steps,
-                generator=generator
-            ).images[0]
+        asced_start_step = 10 if args.model != "PixArt" else 5
+        asced_start_end = 24 if args.model != "PixArt" else 12
         
-        return image
+        
+        timesteps = sorted(uncertainty_maps.keys(), reverse=True)
+        n_timesteps = len(timesteps)
+        example_ts = timesteps[0]
 
+        # Number of samples
+        n_cols = len(uncertainty_maps[example_ts])#uncertainty_maps[example_ts][0].shape[0] // 2
+        n_cols = 1 + n_cols
+        last_layer_idx = n_cols - 2  # Last uncertainty map column
+        num_samples = len(images)
+        masks = prepare_culumative_precentile(num_samples, last_layer_idx, uncertainty_maps, timesteps)
+        heatmaps_batch =  masks
+        '''
+        ASCED_masks =   get_artifact_mask(
+                            torch.stack(latents_lst[asced_start_step:asced_start_end], dim=1),
+                            mad_scale= 3,
+                            min_area = 4,
+                            max_area = 5000,
+                            min_width = 1,
+                            expand_size = 0,
+                            agg_type = "sum",
+                            return_map = True
+                        )'''
+       
+        
 
-
-
-    
-    def caption_image(self, image_paths) -> str:
-        inputs = self.caption_processor.process(
-        images=[Image.open(image_path) for image_path in image_paths],
-        text="Describe this image."
-    )
-
-        inputs = {k: v.to(model.device).unsqueeze(0) for k, v in inputs.items()}
-        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-            output = model.generate_from_batch(
-                inputs,
-                GenerationConfig(max_new_tokens=200, stop_strings="<|endoftext|>"),
-                tokenizer=self.caption_processor.tokenizer
+        for idx in range(len(images)):
+            ref_img = images[idx].resize(
+                (512 if args.model == "1.5v" else 1024,) * 2
             )
-        generated_tokens = output[0,inputs['input_ids'].size(1):]
-        generated_text = processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
-        # print the generated text
-        print(generated_text)
-        exit(1)
-        return generated_text
+            
 
+            overlays = {
+                "sup": overlay_to_pil_simple(
+                    images[idx],
+                    heatmaps_batch[idx].detach(),
+                    target_size=ref_img.size[0],
+                ),
+                "cumperc": overlay_to_pil_simple(
+                    images[idx],
+                    masks[idx],
+                    target_size=ref_img.size[0],
+                ),
+                #"asced": overlay_to_pil_simple(
+                #    images[idx],
+                #    ASCED_masks[idx],
+                #    target_size=ref_img.size[0],
+                #),
+            }
 
-    def compute_rouge_scores(self, prompt: str, caption: str) -> Dict[str, float]:
-        """
-        Compute ROUGE-1 and ROUGE-L scores (precision and recall)
-        
-        Returns:
-            Dictionary with rouge1_precision, rouge1_recall, rougeL_precision, rougeL_recall
-        """
-        scores = self.rouge_scorer.score(prompt, caption)
-        
-        return {
-            'rouge1_precision': scores['rouge1'].precision,
-            'rouge1_recall': scores['rouge1'].recall,
-            'rougeL_precision': scores['rougeL'].precision,
-            'rougeL_recall': scores['rougeL'].recall
-        }
-    
-    
-    def compute_bert_scores(self, prompts: List[str], captions: List[str]) -> Dict[str, np.ndarray]:
-        """
-        Compute BERTScore (precision and recall) for batch of prompt-caption pairs
-        
-        Returns:
-            Dictionary with bert_precision and bert_recall arrays
-        """
-        P, R, F1 = bert_score(
-            captions, 
-            prompts, 
-            lang='en',
-            model_type='bert-base-uncased',
-            device=self.device,
-            verbose=False
-        )
-        
-        return {
-            'bert_precision': P.cpu().numpy(),
-            'bert_recall': R.cpu().numpy()
-        }
-    
-
-    def compute_uncertainty_score(self, prompt: str, caption: str, 
-                                   metric_type: str = 'rougeL_recall') -> float:
-        """
-        Compute uncertainty score for a single prompt-caption pair
-        
-        Uncertainty = 1 - similarity_score
-        
-        Args:
-            metric_type: One of ['rouge1_recall', 'rouge1_precision', 
-                                 'rougeL_recall', 'rougeL_precision']
-        """
-        rouge_scores = self.compute_rouge_scores(prompt, caption)
-        similarity = rouge_scores[metric_type]
-        uncertainty = 1 - similarity
-        return uncertainty
-    
-
-    def evaluate_dataset(self, prompts: List[str], is_ood: bool = True, 
-                        num_inference_steps: int = 50, 
-                        seed_start: int = 42) -> Dict[str, List[float]]:
-        """
-        Evaluate a dataset of prompts and return uncertainty scores
-        
-        Args:
-            prompts: List of text prompts
-            is_ood: Whether this is OOD dataset (affects which metrics to use)
-            num_inference_steps: Number of diffusion steps
-            seed_start: Starting seed for reproducibility
-        
-        Returns:
-            Dictionary containing all uncertainty scores
-        """
-        results = {
-            'rouge1_recall_unc': [],
-            'rouge1_precision_unc': [],
-            'rougeL_recall_unc': [],
-            'rougeL_precision_unc': [],
-            'captions': [],
-            'prompts': []
-        }
-        
-        print(f"\nEvaluating {len(prompts)} prompts...")
-        for idx, prompt in enumerate(tqdm(prompts)):
-            # Generate image
-            image = self.generate_image(
-                prompt, 
-                num_inference_steps=num_inference_steps,
-                seed=seed_start + idx
+            compose_row(
+                reference=ref_img,
+                overlays_dict=overlays,
+                out_path=f"{args.user_study}/sample_{start_idx+idx}.jpg",
+                sample_id=start_idx + idx,
+                csv_writer=csv_writer,
             )
-            
-            # Caption image
-            caption = self.caption_image(image)
-            
-            # Compute ROUGE scores
-            rouge_scores = self.compute_rouge_scores(prompt, caption)
-            
-            # Store uncertainties (1 - similarity)
-            results['rouge1_recall_unc'].append(1 - rouge_scores['rouge1_recall'])
-            results['rouge1_precision_unc'].append(1 - rouge_scores['rouge1_precision'])
-            results['rougeL_recall_unc'].append(1 - rouge_scores['rougeL_recall'])
-            results['rougeL_precision_unc'].append(1 - rouge_scores['rougeL_precision'])
-            results['captions'].append(caption)
-            results['prompts'].append(prompt)
-        
-        # Compute BERTScore in batch for efficiency
-        print("Computing BERTScores...")
-        bert_scores = self.compute_bert_scores(prompts, results['captions'])
-        results['bert_recall_unc'] = (1 - bert_scores['bert_recall']).tolist()
-        results['bert_precision_unc'] = (1 - bert_scores['bert_precision']).tolist()
-        
-        return results
-    
-
-
-    def compute_metrics(self, id_uncertainties: np.ndarray, 
-                       ood_uncertainties: np.ndarray) -> Dict[str, float]:
-        """
-        Compute AUROC, AUPR, and FPR95 metrics
-        
-        Args:
-            id_uncertainties: Uncertainty scores for in-distribution data
-            ood_uncertainties: Uncertainty scores for out-of-distribution data
-        
-        Returns:
-            Dictionary with auroc, aupr, fpr95
-        """
-        # Combine uncertainties and create labels
-        # OOD should have higher uncertainty (positive class)
-        uncertainties = np.concatenate([id_uncertainties, ood_uncertainties])
-        labels = np.concatenate([
-            np.zeros(len(id_uncertainties)),  # ID = 0
-            np.ones(len(ood_uncertainties))   # OOD = 1
-        ])
-        
-        # AUROC
-        auroc = roc_auc_score(labels, uncertainties)
-        
-        # AUPR
-        aupr = average_precision_score(labels, uncertainties)
-        
-        # FPR95 (False Positive Rate at 95% True Positive Rate)
-        fpr, tpr, thresholds = roc_curve(labels, uncertainties)
-        fpr95_idx = np.argmax(tpr >= 0.95)
-        fpr95 = fpr[fpr95_idx]
-        
-        return {
-            'auroc': auroc * 100,  # Convert to percentage
-            'aupr': aupr * 100,
-            'fpr95': fpr95 * 100
-        }
-    
-    
-    def full_evaluation(self, id_prompts: List[str], ood_prompts: List[str],
-                       num_inference_steps: int = 50) -> Dict:
-        """
-        Perform full PUNC evaluation comparing ID and OOD datasets
-        
-        Returns:
-            Dictionary with results for all metrics
-        """
-        print("="*80)
-        print("PUNC EVALUATION - Stable Diffusion 1.5")
-        print("="*80)
-        
-        # Evaluate ID dataset
-        print("\n[1/2] Evaluating In-Distribution (Normal) Dataset...")
-        id_results = self.evaluate_dataset(
-            id_prompts, 
-            is_ood=False,
-            num_inference_steps=num_inference_steps
-        )
-        
-        # Evaluate OOD dataset
-        print("\n[2/2] Evaluating Out-of-Distribution Dataset...")
-        ood_results = self.evaluate_dataset(
-            ood_prompts,
-            is_ood=True,
-            num_inference_steps=num_inference_steps
-        )
-        
-        # Compute metrics for each uncertainty type
-        print("\n" + "="*80)
-        print("COMPUTING METRICS")
-        print("="*80)
-        
-        metrics_results = {}
-        
-        # For OOD detection, we use recall-based metrics (epistemic uncertainty)
-        metric_names = [
-            ('ROUGE-1 Recall', 'rouge1_recall_unc'),
-            ('ROUGE-L Recall', 'rougeL_recall_unc'),
-            ('BERT Recall', 'bert_recall_unc')
-        ]
-        
-        for display_name, key in metric_names:
-            metrics = self.compute_metrics(
-                np.array(id_results[key]),
-                np.array(ood_results[key])
-            )
-            metrics_results[display_name] = metrics
-            
-            print(f"\n{display_name}:")
-            print(f"  AUROC: {metrics['auroc']:.2f}%")
-            print(f"  AUPR:  {metrics['aupr']:.2f}%")
-            print(f"  FPR95: {metrics['fpr95']:.2f}%")
-        
-        return {
-            'id_results': id_results,
-            'ood_results': ood_results,
-            'metrics': metrics_results
-        }
-
-
-def create_sample_datasets():
-    """
-    Create sample datasets for demonstration
-    You should replace these with actual datasets from the paper
-    """
-    
-    # Normal (ID) - ImageNet-like prompts
-    normal_prompts = [
-        "A photograph of a golden retriever sitting in a grassy field",
-        "A close-up photo of a red apple on a wooden table",
-        "A picture of a blue sports car on a city street",
-        "An image of a tabby cat sleeping on a couch",
-        "A photo of a modern laptop computer on a desk"
-    ]
-    
-    # Microscopic (OOD) - Simulated microscopic prompts
-    microscopic_prompts = [
-        "Microscopic view of red blood cells flowing through a capillary",
-        "High magnification image of bacterial cells with flagella",
-        "Electron microscope image of coronavirus particles",
-        "Microscopic photograph of plant cell structures showing chloroplasts",
-        "Detailed view of crystalline structures under polarized light microscopy"
-    ]
-    
-    # Vague (Aleatoric) - Minimal context prompts
-    vague_prompts = [
-        "An image of a dog",
-        "A picture of food",
-        "An image of nature",
-        "A photo of transportation",
-        "An image of furniture"
-    ]
-    
-    return {
-        'normal': normal_prompts,
-        'microscopic': microscopic_prompts,
-        'vague': vague_prompts
-    }
-
-
-# ============================================================================
-# MAIN EVALUATION SCRIPT
-# ============================================================================
-
-if __name__ == "__main__":
-    # Initialize evaluator
-    evaluator = PUNCEvaluator()
-    
-    # Create sample datasets
-    datasets = create_sample_datasets()
-    
-    # ========================================================================
-    # TASK 1: OOD Detection (Normal vs Microscopic)
-    # ========================================================================
-    print("\n" + "="*80)
-    print("TASK 1: OOD DETECTION - Normal (ID) vs Microscopic (OOD)")
-    print("="*80)
-    
-    results_ood = evaluator.full_evaluation(
-        id_prompts=datasets['normal'],
-        ood_prompts=datasets['microscopic'],
-        num_inference_steps=50
-    )
-    
-    # ========================================================================
-    # TASK 2: Aleatoric Uncertainty Detection (Normal vs Vague)
-    # ========================================================================
-    print("\n\n" + "="*80)
-    print("TASK 2: ALEATORIC UNCERTAINTY - Normal vs Vague")
-    print("="*80)
-    
-    # For aleatoric uncertainty, evaluate with precision-based metrics
-    print("\n[1/2] Evaluating In-Distribution (Normal) Dataset...")
-    id_results_vague = evaluator.evaluate_dataset(
-        datasets['normal'],
-        is_ood=False,
-        num_inference_steps=50
-    )
-    
-    print("\n[2/2] Evaluating Vague Prompts Dataset...")
-    vague_results = evaluator.evaluate_dataset(
-        datasets['vague'],
-        is_ood=True,
-        num_inference_steps=50
-    )
-    
-    # Compute metrics using precision (for aleatoric uncertainty)
-    print("\n" + "="*80)
-    print("COMPUTING METRICS (Precision-based for Aleatoric Uncertainty)")
-    print("="*80)
-    
-    metric_names_prec = [
-        ('ROUGE-1 Precision', 'rouge1_precision_unc'),
-        ('ROUGE-L Precision', 'rougeL_precision_unc'),
-        ('BERT Precision', 'bert_precision_unc')
-    ]
-    
-    for display_name, key in metric_names_prec:
-        metrics = evaluator.compute_metrics(
-            np.array(id_results_vague[key]),
-            np.array(vague_results[key])
-        )
-        
-        print(f"\n{display_name}:")
-        print(f"  AUROC: {metrics['auroc']:.2f}%")
-        print(f"  AUPR:  {metrics['aupr']:.2f}%")
-        print(f"  FPR95: {metrics['fpr95']:.2f}%")
-    
-    # ========================================================================
-    # SAVE RESULTS
-    # ========================================================================
-    print("\n" + "="*80)
-    print("EVALUATION COMPLETE!")
-    print("="*80)
-    
-    # Save detailed results to JSON
-    save_results = {
-        'ood_task': {
-            'id_prompts': datasets['normal'],
-            'ood_prompts': datasets['microscopic'],
-            'id_captions': results_ood['id_results']['captions'],
-            'ood_captions': results_ood['ood_results']['captions'],
-            'metrics': results_ood['metrics']
-        },
-        'vague_task': {
-            'id_prompts': datasets['normal'],
-            'vague_prompts': datasets['vague'],
-            'id_captions': id_results_vague['captions'],
-            'vague_captions': vague_results['captions'],
-            'id_rouge1_prec_unc': id_results_vague['rouge1_precision_unc'],
-            'vague_rouge1_prec_unc': vague_results['rouge1_precision_unc']
-        }
-    }
-    
-    with open('punc_evaluation_results.json', 'w') as f:
-        json.dump(save_results, f, indent=2)
-    
-    print("\nResults saved to 'punc_evaluation_results.json'")
-    print("\nTo use with larger datasets, replace the sample prompts in")
-    print("create_sample_datasets() with your actual dataset prompts.")
+             

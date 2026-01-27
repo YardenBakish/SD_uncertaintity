@@ -92,19 +92,10 @@ def get_uncertainty_guided_score_with_percentile(pred_epsilon: Tensor, input: Te
      
         pred_epsilon_copy = pred_epsilon
         pred_epsilon = pred_epsilon.repeat_interleave(2, dim=0)
-
-        
-        #print(input.shape)
-        #print(pred_epsilon.shape)
-        #print(alpha_hat_t.shape)
-        #exit(1)
         
         pred_x_0 = (input - sqrt(1 - alpha_hat_t) * pred_epsilon) / sqrt(alpha_hat_t)
         for _ in range(num_uncertainty_samples):
-            x_hat_t = sqrt(alpha_hat_t) * pred_x_0 + sqrt(1 - alpha_hat_t) * torch.randn_like(pred_epsilon[0])
-            #print(x_hat_t.shape)
-            #print(t_tensor.shape)
-            #exit(1)
+            x_hat_t = sqrt(alpha_hat_t) * pred_x_0 + sqrt(1 - alpha_hat_t) * torch.randn_like(pred_epsilon)
             if model_type == 'unet':
                 pred_epsilon = predict_model(model, x_hat_t, t_tensor, y, extra_diffusion_kwargs=extra_diffusion_kwargs)
             elif model_type == 'stable-diffusion-3':
@@ -118,9 +109,9 @@ def get_uncertainty_guided_score_with_percentile(pred_epsilon: Tensor, input: Te
                 pred_epsilon_hat = predict_model_stable_diffusion(model, x_hat_t, t_tensor, y, guidance_scale, extra_diffusion_kwargs=extra_diffusion_kwargs)
             
             pred_epsilons_hat.append(pred_epsilon_hat)
-        if False:
+        if use_posterior:
             
-            pred_epsilons_hat.append(pred_epsilon)
+            pred_epsilons_hat.append(pred_epsilon_copy)
         
         
        
@@ -138,7 +129,7 @@ def get_uncertainty_guided_score_with_percentile(pred_epsilon: Tensor, input: Te
     uncertainty_shape = pixel_wise_uncertainty.shape
     #print(f'{pixel_wise_uncertainty=}')
     #print("here")
-    return _, pixel_wise_uncertainty
+    #print(pixel_wise_uncertainty.shape)
     #CHANGEHERE
     
     
@@ -149,18 +140,8 @@ def get_uncertainty_guided_score_with_percentile(pred_epsilon: Tensor, input: Te
         inv_var: torch.Tensor = 1 / pixel_wise_uncertainty
         post_var_trace = (M * inv_var) + (1 / alpha_hat_t)
         post_precision = 1 / post_var_trace
-        print(post_precision.shape)
-        print(inv_var.shape)
-        print(pred_epsilon.repeat_interleave(2, dim=1).shape)
-
-
-        post_score = post_precision * (inv_var * pred_epsilon.repeat_interleave(2, dim=1).sum(dim=0))
-
-        print(thresholded_map.shape)
-        print(pred_epsilon.repeat_interleave(2, dim=1).shape)
-        print(post_score.shape)
-
-        final_epsilon = (pred_epsilon.repeat_interleave(2, dim=1) * (1 - thresholded_map)) + (thresholded_map * post_score)
+        post_score = post_precision * (inv_var * pred_epsilon_copy.sum(dim=0))
+        final_epsilon = (pred_epsilon_copy * (1 - thresholded_map)) + (thresholded_map * post_score)
     else:
         assert pred_epsilon.grad is not None
         update_scores = pred_epsilon.grad * 1
@@ -194,17 +175,11 @@ def predict_model_stable_diffusion_3(model, sample, t_tensor, y, guidance_scale:
     if extra_diffusion_kwargs is None:
         extra_diffusion_kwargs = dict()
     extra_diffusion_kwargs['return_dict'] = False
-    #print('t_tensor', t_tensor)
-    #print(extra_diffusion_kwargs)
-    #print(sample.shape)
-    #print(t_tensor.shape)
-    #print(y.shape)
-    #exit(1)
-
-   
+    print('t_tensor', t_tensor)
+    
     pred_noise = model(
         hidden_states=sample,
-        timestep=t_tensor.expand(sample.shape[0]),
+        timestep=t_tensor,
         encoder_hidden_states=y,
         **extra_diffusion_kwargs,
     )[0]

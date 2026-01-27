@@ -50,9 +50,9 @@ def compute_fid_custom(dir_fake, dir_real, batch_size=256, num_workers=4, file_i
 
 
 if __name__ == "__main__":
-    gen_folders = ["uncertaintity_maps/SDXL/basic/coco/", "uncertaintity_maps/1.5v/basic/coco/"]
+    gen_folders = ["uncertaintity_maps/PixArt/basic/coco/" ]
     
-    real_dir = "datasets/coco/val2014"
+    real_dir =  "datasets/coco/val2014"
     indices = range(30000)
     n_remove = int(len(indices) * 0.16)         # how many to remove
     to_remove = set(random.sample(indices, n_remove))  # pick exactly 16% randomly

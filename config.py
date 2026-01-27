@@ -3,6 +3,10 @@ import torch
 from diffusers import DDIMScheduler
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from modules.pipeline_stable_xl_diffusion import StableDiffusionXLPipeline
+from modules.tmp_pipeline_stable_diffusion import StableDiffusionPipeline as StableDiffusionPipelineTMP
+
+from modules.tmp_pipeline_stable_diffusion_xl import StableDiffusionXLPipeline as TmpStableDiffusionXLPipeline
+from modules.pixart_transformer import PixArtTransformer2DModel
 from modules.pipeline_pixart_sigma import PixArtSigmaPipeline
 from datasets import Dataset
 #from diffusers import PixArtSigmaPipeline
@@ -29,11 +33,11 @@ METHODS_EVAL = {
     "agg_ASCED_calculation": ["sum",  "count"], #"max",
 
     "global_start_indices": [3, 6, 12, 20],
-    "global_end_indices": [-5,-8,-12], #calculated as naegative (-5)
+    "global_end_indices": [-5,-8,-12,24,30], #calculated as naegative (-5)
 
 
     "MAD_values" : [3,6,10,], #1, 12
-    "MAD_start_indices": [10, 12, 14, 20] ,
+    "MAD_start_indices": [10, 12, 14,] , # 20
 
     "MAD_end_indices": [24, 27, 30,] , # 32, 40
     
@@ -56,6 +60,10 @@ METHODS_EVAL = {
 
 
 def set_config(args, gen_samples = False):
+
+    if args.mode == "calc_iou":
+        return
+
     if gen_samples:
         if args.dataset == "flickr8k":
             args.loaded_dataset = load_dataset("jxie/flickr8k", split=f"validation[:{1000}]", trust_remote_code=True)
@@ -82,10 +90,10 @@ def set_config(args, gen_samples = False):
             args.loaded_dataset = Dataset.from_pandas(df.reset_index(drop=True))
             args.loaded_dataset = args.loaded_dataset.select(range(30000))
 
-            if args.generate_var_uc_scores:
-                args.apply_uc = False if args.generate_var_uc_scores else True, 
-                args.apply_uc_on_all_timesteps=False if args.generate_var_uc_scores else True, 
-                args.return_mid_reps = False if args.generate_var_uc_scores else True
+           
+            args.apply_uc = True # False if args.generate_var_uc_scores else True, 
+            args.apply_uc_on_all_timesteps= True # False if args.generate_var_uc_scores else True, 
+            args.return_mid_reps = True # if args.generate_var_uc_scores else False
 
             #print(df.head(5))
             #print("Total rows:", len(df))
@@ -97,26 +105,50 @@ def set_config(args, gen_samples = False):
         #scheduler =  PNDMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
         scheduler = DDIMScheduler.from_config("runwayml/stable-diffusion-v1-5", subfolder="scheduler",torch_dtype=torch.float16,)
 
+        if args.mode == "demo" or args.mode == "motivation_exp" or args.mode == "motivation_exp_quant" or args.mode == "user_study":
+            unet = UNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet",torch_dtype=torch.float32,)
+            args.pipe = StableDiffusionPipeline.from_pretrained(
+                "runwayml/stable-diffusion-v1-5",
+                torch_dtype=torch.float32,
+                unet=unet,  
+            # scheduler = scheduler,
+            ).to("cuda")
+            args.batch_size = 8
+
+        else:
         # Load model (weights download automatically)
-        args.pipe = StableDiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            torch_dtype=torch.float16,
-            unet=unet,  
-        # scheduler = scheduler,
-        ).to("cuda")
-        args.batch_size = 8
+            args.pipe = StableDiffusionPipeline.from_pretrained(
+                "runwayml/stable-diffusion-v1-5",
+                torch_dtype=torch.float16,
+                unet=unet,  
+            # scheduler = scheduler,
+            ).to("cuda")
+            args.batch_size = 8
+        
     elif args.model == "SDXL":
         unet = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", subfolder="unet",torch_dtype=torch.float16,)
         scheduler = DDIMScheduler.from_config("stabilityai/stable-diffusion-xl-base-1.0", subfolder="scheduler",torch_dtype=torch.float16,)
-        args.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float16, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
-        args.batch_size = 2
+        if False:#args.mode == "demo":
+            unet = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", subfolder="unet",torch_dtype=torch.float32,)
+
+            #args.pipe = TmpStableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float32, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
+            args.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float32, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
+            
+            args.batch_size = 1
+        else:
+            args.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", scheduler=scheduler, torch_dtype=torch.float16, use_safetensors=True, variant="fp16", unet=unet).to("cuda")
+            args.batch_size = 2
 
     elif args.model == "PixArt":
         scheduler = DDIMScheduler.from_config("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", subfolder="scheduler",torch_dtype=torch.float16,)
+        transformer = PixArtTransformer2DModel.from_pretrained("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", subfolder="transformer",torch_dtype=torch.float16,)
+
+        PixArtTransformer2DModel
         args.pipe = PixArtSigmaPipeline.from_pretrained(
             "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", 
             torch_dtype=torch.float16,
             scheduler = scheduler,
+            transformer = transformer,
             use_safetensors=True,
         ).to("cuda")
 
@@ -133,6 +165,86 @@ def set_config(args, gen_samples = False):
     if args.mode == "compare_methods":
         args.methods_eval = METHODS_EVAL
 
+
+        if args.model == "PixArt":
+            args.methods_eval["methods"]["globalTimestep"] = True
+            args.methods_eval["methods"]["ASCEDLatent"] = True
+            args.methods_eval['global_agg_calculation'] = ["prWeighted", "pr"]
+
+            args.methods_eval["global_start_indices"] = [9,10,11] #3, 6,
+            args.methods_eval["global_end_indices"] = [15,16,17] #-5,
+
+            args.methods_eval["MAD_start_indices"] =  [5,7,10]  # 20
+            args.methods_eval["MAD_end_indices"] =  [12,17]
+             
+            args.methods_eval['agg_ASCED_calculation'] = ["sum"]
+            args.methods_eval['MAD_values'] = [3]
+            return 
+
+        if args.calc_grad_fid:
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            args.methods_eval["methods"]["globalTimestep"] = True
+            args.methods_eval["methods"]["ASCEDLatent"] = True
+            args.methods_eval['global_agg_calculation'] = ["prWeighted", "pr"]
+            args.methods_eval["global_start_indices"] = [3,12]
+            args.methods_eval["global_end_indices"] = [-5]
+            args.methods_eval['agg_ASCED_calculation'] = ["sum"]
+            args.methods_eval["MAD_start_indices"] = [10]  # 20
+            args.methods_eval["MAD_end_indices"] = [24]
+            args.methods_eval['MAD_values'] = [3]
+            return 
+
+        
+        
+        
+        if args.calc_sup_metrics:
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            if args.use_global:
+                args.methods_eval["methods"]["globalTimestep"] = True
+            else:
+                args.methods_eval["methods"]["ASCEDLatent"] = True
+
+            if args.model == "PixArt":
+                
+                args.methods_eval['global_agg_calculation'] = ["pr", "prWeighted"]
+                args.methods_eval["global_start_indices"] = [9,10,11] #3, 6,
+                args.methods_eval["global_end_indices"] = [15,16,17] #-5,
+
+                args.methods_eval["MAD_start_indices"] =  [5,7,10]  # 20
+                args.methods_eval["MAD_end_indices"] =  [12,17]
+             
+                args.methods_eval['agg_ASCED_calculation'] = ["sum"]
+                args.methods_eval['MAD_values'] = [3]
+            else:
+                args.methods_eval['global_agg_calculation'] = ["pr", "prWeighted"]
+                args.methods_eval["global_start_indices"] = [3, 6, 12, 20] #
+                args.methods_eval["global_end_indices"] = [-8,-12, 24, 30] #-5,
+                args.methods_eval['agg_ASCED_calculation'] = ["sum"]
+                args.methods_eval['MAD_values'] = [3]
+            return
+        
+
+
+
+
+        if args.calc_cmmd:
+            for method in args.methods_eval["methods"]:
+                args.methods_eval["methods"][method] = False
+            if args.use_global:
+                args.methods_eval["methods"]["globalTimestep"] = True
+            else:
+                args.methods_eval["methods"]["ASCEDLatent"] = True
+
+            
+
+            args.methods_eval['global_agg_calculation'] = ["prWeighted", "pr"]
+            args.methods_eval["global_start_indices"] = [3, 6, 12, 20]
+            args.methods_eval["global_end_indices"] = [-8,-12, 24, 30] #-5,
+            args.methods_eval['agg_ASCED_calculation'] = ["sum"]
+            args.methods_eval['MAD_values'] = [3]
+            return
 
         if args.compare_vis:
             for method in args.methods_eval["methods"]:

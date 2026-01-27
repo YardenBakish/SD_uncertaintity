@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import numpy as np
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from modules.uncertainty_guidance_origin import get_uncertainty_guided_score_with_percentile
+from modules.uncertaintity_guidance import get_uncertainty_guided_score_with_percentile
 
 import torch
 from transformers import (
@@ -79,6 +79,48 @@ EXAMPLE_DOC_STRING = """
         >>> image = pipe(prompt).images[0]
         ```
 """
+IS_SECOND_GRAD = True
+IS_MASK = True
+
+
+
+def otsu_threshold(img):
+    """
+    Compute Otsu's threshold for a 2D array.
+    """
+    img = (img - img.min()) / (img.max() - img.min())
+    # Flatten the image into 1D array
+    flat = img.flatten()
+    
+    # Get histogram
+    hist, bins = np.histogram(flat, bins=256, range=(0,1))
+    hist = hist.astype(float)
+    
+    # Get bin centers
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    
+    # Get total number of pixels
+    total = hist.sum()
+    
+    best_thresh = 0
+    best_variance = 0
+    
+    # Calculate cumulative sums
+    weight1 = np.cumsum(hist)
+    weight2 = np.cumsum(hist[::-1])[::-1]
+    
+    # Calculate cumulative means
+    mean1 = np.cumsum(hist * bin_centers) / weight1
+    mean2 = (np.cumsum((hist * bin_centers)[::-1]) / weight2[::-1])[::-1]
+    
+    # Calculate between class variance
+    variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+    
+    # Get threshold with maximum variance
+    idx = np.argmax(variance)
+    best_thresh = bin_centers[idx]
+    
+    return best_thresh
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
@@ -856,9 +898,6 @@ class StableDiffusionXLPipeline(
         negative_target_size: Optional[Tuple[int, int]] = None,
         clip_skip: Optional[int] = None,
         apply_uc : Optional[bool] = False,
-        ablation : Optional[bool] = False,
-        return_aux: Optional[bool] = False,
-
         return_mid_reps: Optional[bool] = False,
         uc_num_timesteps : Optional[int] = 6,
         apply_uc_on_all_timesteps : Optional[bool] = False,
@@ -1210,17 +1249,20 @@ class StableDiffusionXLPipeline(
         
         
         uncertainty_maps = {ts.detach().item(): {} for ts in timesteps_to_analyze}
-        latents_lst = []
-        aux_list = []
+        d_log = []
 
+        latents_lst = []
         all_pixel_wise_uncertainty_lst = []
         tmp_pixel_wise_uncertainty_lst = []
 
+        scale_range = np.linspace(1.0, 0.5, len(self.scheduler.timesteps))
+        step_size = 120 * np.sqrt(scale_range)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-
+                
+                
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
@@ -1232,48 +1274,43 @@ class StableDiffusionXLPipeline(
                     added_cond_kwargs["image_embeds"] = image_embeds
                 if apply_uc and t in timesteps_to_analyze:
                     latent_model_input_grad = latent_model_input.detach().clone().requires_grad_(True)
-              
-
+                    
+                    
                     # predict the noise residual
-                    noise_pred = self.unet(
-                        latent_model_input_grad,
-                        t,
-                        encoder_hidden_states=prompt_embeds,
-                        timestep_cond=timestep_cond,
-                        cross_attention_kwargs=self.cross_attention_kwargs,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                        apply_uc = True,
-                    )
+                    with torch.enable_grad():
+                        noise_pred = self.unet(
+                            latent_model_input_grad,
+                            t,
+                            encoder_hidden_states=prompt_embeds,
+                            timestep_cond=timestep_cond,
+                            cross_attention_kwargs=self.cross_attention_kwargs,
+                            added_cond_kwargs=added_cond_kwargs,
+                            return_dict=False,
+                            apply_uc = True,
+                        )
+
+                    #latent_model_input_grad.detach()
+                    self.unet.zero_grad()
         
                     noise_pred, intermediate_reps = noise_pred[0], noise_pred[1]
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-
-                    if return_aux:
-                        curr_aux = torch.nn.functional.mse_loss(noise_pred_text.clone().detach(), noise_pred_uncond.clone().detach(), reduction  = "none")
-                        curr_aux = torch.abs(curr_aux).max(dim=1)[0]
-                        
-                        aux_list.append(curr_aux)
                     aux_loss = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond)
-
-                    
-                    if ablation:
-                        grads = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond, reduction  = "none")
-
-                        grads = [grads.repeat(2, 1, 1, 1)]
-
-
-                     
+                    if IS_SECOND_GRAD:
+                        target_loss = 4.8466e-5
                     else:
-                        grads = torch.autograd.grad(
+                        target_loss =  3.734e-05
+                    #target_loss = 1.9277e-05 #0.0001
+                    start_fix = 1000
+                    end_fix = 361#101
+
+                    iteration = 0
+                    grads = torch.autograd.grad(
                             aux_loss,
-                            intermediate_reps,
+                            latent_model_input_grad,
                             retain_graph=False,
                             create_graph=False
                         )
-                    
-                    #print(grads[0].shape)
-                   
+
                     for layer_idx, grad in  enumerate(grads):
                         
 
@@ -1286,12 +1323,114 @@ class StableDiffusionXLPipeline(
                         #    )
                         uncertainty_maps[t.item()][layer_idx] = uncertainty.detach().cpu()
                     
+                    #print(len(grads))
+                    #exit(1)
+                    #print(grads.max())
+                    #print(aux_loss)
+                    grads = torch.abs(grads[0]).max(dim=1, keepdim=True)[0]
+                   
+                    threshold_grad = grads.quantile(0.95)
+                    mask_grad095 = (grads >= threshold_grad).float()  # [64,64]
 
-                #torch.Size([4, 1, 64, 64])
-                #torch.Size([4, 1, 128, 128])
-                #torch.Size([4, 1, 128, 128])
-                #torch.Size([4, 1, 128, 128])
+                    if IS_MASK:
+                        threshold_cond_grad = grads[1].quantile(0.95) # otsu_threshold(grads[1].detach().cpu()) #
+                        #print(threshold_cond_grad.max())
+                        #print(threshold_cond_grad.min())
+                        #grads[1]  = (grads[1] - grads[1].min()) / (grads[1].max() - grads[1].min())
+                        #exit(1)
+                        anti_mask = (grads[1] < threshold_cond_grad).float()  # [64,64]
+                        print(anti_mask.max)
+                        print(anti_mask.min())
+                        anti_mask[anti_mask==0] = (t*0.8 / 1000)
 
+                        print(anti_mask.max)
+                        print(anti_mask.min())
+                        exit(1)
+
+                    #print(anti_mask.shape)
+                    #exit(1)
+
+                    grads095 = grads * mask_grad095  # gradients only flow for high-max patches
+                   
+                    
+                    d_log.append(f"{t}: AUX: {aux_loss} | grad0.95: {grads095.sum()} ")
+
+                    curr_thr = grads095.sum() if IS_SECOND_GRAD else aux_loss
+                    #print(curr_thr)
+                    while False:#curr_thr > target_loss and (start_fix >= t >= end_fix): #aux_loss > target_loss:
+
+                        if iteration > 20:
+                            break
+
+                        latent_model_input_grad = latent_model_input.detach().clone().requires_grad_(True)
+                
+                        
+                        # predict the noise residual
+                        with torch.enable_grad():
+                            noise_pred = self.unet(
+                                latent_model_input_grad,
+                                t,
+                                encoder_hidden_states=prompt_embeds,
+                                timestep_cond=timestep_cond,
+                                cross_attention_kwargs=self.cross_attention_kwargs,
+                                added_cond_kwargs=added_cond_kwargs,
+                                return_dict=False,
+                                apply_uc = True,
+                            )
+
+            
+                        noise_pred, intermediate_reps = noise_pred[0], noise_pred[1]
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        aux_loss = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond)
+
+                        
+                        if IS_SECOND_GRAD:
+                            first_grads = torch.autograd.grad(
+                                aux_loss,
+                                intermediate_reps[-1],
+                                retain_graph=True,
+                                create_graph=True
+                            )[0]
+                            
+
+                            max_per_patch = torch.abs(first_grads).max(dim=0).values  # [64,64]
+                            threshold = max_per_patch.quantile(0.95)
+                            #mask = (max_per_patch >= threshold).float()  # [64,64]
+                            first_grads98_sum = first_grads[first_grads >=threshold].sum()
+                            curr_thr = first_grads98_sum
+                            second_grads = torch.autograd.grad(
+                                first_grads98_sum,
+                                latent_model_input_grad,
+                                retain_graph=True,
+                                create_graph=False
+                            )[0]
+                            print(f"\t TIME{t}: {curr_thr} | {target_loss}")
+                            #print(second_grads.max())
+                            #print(second_grads.min())
+                            #exit(1)
+                            latent_model_input_grad = latent_model_input_grad - float(step_size[i]) * second_grads
+
+                        else:
+                            latent_model_input_grad = latent_model_input_grad - float(step_size[i]) * grads
+
+                        
+                            
+
+                            #print(f"\tGRADS: {grads[0][0][64][64]}")
+                            #print(f"\tLATENT: {latent_model_input_grad[0][0][64][64]}")
+                            #print(f"\tSTEP: {float(step_size[i])}")
+
+                            #print(grads.max())
+                   
+                        latent_model_input = latent_model_input_grad.detach()
+                        iteration+=1
+                   
+                    #exit(1)
+                    
+
+                    
+             
+                noise_pred = noise_pred.detach()
                 with torch.no_grad():
                     noise_pred = self.unet(
                         latent_model_input,
@@ -1307,7 +1446,11 @@ class StableDiffusionXLPipeline(
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    if IS_MASK and (start_fix >= t):
+                        noise_pred = noise_pred_uncond + anti_mask.unsqueeze(0)* self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        
+                    else:
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
                     # Based on 3.4. in https://huggingface.co/papers/2305.08891
@@ -1425,4 +1568,4 @@ class StableDiffusionXLPipeline(
         if not return_dict:
             return (image,)
 
-        return StableDiffusionXLPipelineOutput(images=image), {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst, "aux_list": aux_list, "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst}
+        return StableDiffusionXLPipelineOutput(images=image), {"uncertainty_maps": uncertainty_maps, "d_log": d_log,  "latents_lst": latents_lst, "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst}

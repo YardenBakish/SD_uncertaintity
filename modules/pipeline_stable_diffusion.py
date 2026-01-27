@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import inspect 
 from typing import Any, Callable, Dict, List, Optional, Union
-from modules.uncertaintity_guidance import get_uncertainty_guided_score_with_percentile
+from modules.uncertainty_guidance_origin import get_uncertainty_guided_score_with_percentile
 import torch
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
@@ -801,13 +802,14 @@ class StableDiffusionPipeline(
         guidance_rescale: float = 0.0,
         clip_skip: Optional[int] = None,
         apply_uc : Optional[bool] = False,
+        ablation: Optional[bool] = False,
         return_mid_reps: Optional[bool] = False,
-
+        return_aux: Optional[bool] = False,
         uc_num_timesteps : Optional[int] = 6,
         apply_uc_on_all_timesteps : Optional[bool] = False,
         apply_var_method_uc: Optional[bool] = False,
         percentile: float = 0.95,
-        lr: float | Callable[[int], float] = 0.001,
+        lr: float | Callable[[int], float] = 0.001, 
 
         callback_on_step_end: Optional[
             Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
@@ -1051,6 +1053,7 @@ class StableDiffusionPipeline(
         
         uncertainty_maps = {ts.detach().item(): {} for ts in timesteps_to_analyze}
         latents_lst = []
+        aux_list = []
         all_pixel_wise_uncertainty_lst = []
         tmp_pixel_wise_uncertainty_lst = []
 
@@ -1084,14 +1087,27 @@ class StableDiffusionPipeline(
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     
                     
+                    if return_aux:
+                        curr_aux = torch.nn.functional.mse_loss(noise_pred_text.clone().detach(), noise_pred_uncond.clone().detach(), reduction  = "none")
+                        curr_aux = torch.abs(curr_aux).max(dim=1)[0]
+                        
+                        aux_list.append(curr_aux)
+
+
 
                     aux_loss = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond)
-                    grads = torch.autograd.grad(
-                        aux_loss,
-                        intermediate_reps,
-                        retain_graph=False,
-                        create_graph=False
-                    )
+
+                    if ablation:
+                        grads = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond, reduction  = "none")
+                        grads = [grads.repeat(2, 1, 1, 1)]
+                    
+                    else:
+                        grads = torch.autograd.grad(
+                            aux_loss,
+                            intermediate_reps,
+                            retain_graph=False,
+                            create_graph=False
+                        )
                   
                     for layer_idx, grad in  enumerate(grads):
 
@@ -1213,4 +1229,6 @@ class StableDiffusionPipeline(
             if not return_dict:
                 return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept), {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst, "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst}
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept), {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst, 
+                                                                                                    "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst,
+                                                                                                    "aux_list": aux_list}

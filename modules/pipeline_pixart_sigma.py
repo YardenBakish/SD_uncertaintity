@@ -17,6 +17,7 @@ import inspect
 import re
 import urllib.parse as ul
 from typing import Callable, List, Optional, Tuple, Union
+from modules.uncertaintity_guidance import get_uncertainty_guided_score_with_percentile
 
 import torch
 from transformers import T5EncoderModel, T5Tokenizer
@@ -628,7 +629,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
-    @torch.no_grad()
+    
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
@@ -652,6 +653,13 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
+        apply_uc : Optional[bool] = False,
+        ablation: Optional[bool] = False,
+        return_mid_reps: Optional[bool] = False,
+        return_aux: Optional[bool] = False,
+        uc_num_timesteps : Optional[int] = 6,
+        apply_uc_on_all_timesteps : Optional[bool] = False,
+        apply_var_method_uc: Optional[bool] = False,
         clean_caption: bool = True,
         use_resolution_binning: bool = True,
         max_sequence_length: int = 300,
@@ -832,6 +840,23 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
+
+        if apply_uc_on_all_timesteps:
+            idx = torch.linspace(0, len(timesteps)-1, len(timesteps)//2, dtype=torch.long)
+            idx = torch.linspace(0, len(timesteps)-1, len(timesteps), dtype=torch.long)
+
+        else:
+            idx = torch.linspace(len(timesteps)//2, len(timesteps)-1, uc_num_timesteps, dtype=torch.long)
+        timesteps_to_analyze = timesteps[idx]
+        
+        
+        uncertainty_maps = {ts.detach().item(): {} for ts in timesteps_to_analyze}
+        latents_lst = []
+        aux_list = []
+        all_pixel_wise_uncertainty_lst = []
+        tmp_pixel_wise_uncertainty_lst = []
+
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -853,15 +878,69 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 current_timestep = current_timestep.expand(latent_model_input.shape[0])
 
+                if apply_uc and t in timesteps_to_analyze:
+                    latent_model_input_grad = latent_model_input.detach().clone().requires_grad_(True)
+                    # predict the noise residual
+                    noise_pred = self.transformer(
+                        latent_model_input,
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                        timestep=current_timestep,
+                        apply_uc = apply_uc,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )
+                    noise_pred, intermediate_reps = noise_pred[0], noise_pred[1]
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    
+                    
+                    if return_aux:
+                        curr_aux = torch.nn.functional.mse_loss(noise_pred_text.clone().detach(), noise_pred_uncond.clone().detach(), reduction  = "none")
+                        curr_aux = torch.abs(curr_aux).max(dim=1)[0]
+                        aux_list.append(curr_aux)
+
+                    aux_loss = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond)
+
+                    if ablation:
+                        grads = torch.nn.functional.mse_loss(noise_pred_text, noise_pred_uncond, reduction  = "none")
+                        grads = [grads.repeat(2, 1, 1, 1)]
+                    
+                    else:
+                        grads = torch.autograd.grad(
+                            aux_loss,
+                            intermediate_reps,
+                            retain_graph=False,
+                            create_graph=False
+                        )
+                  
+                    for layer_idx, grad in  enumerate(grads):
+                        
+                        if grad.dim() == 3:
+                            _, _, grad_channels = grad.shape
+                            sqrt_K = int(grad.shape[1] ** 0.5)
+                            
+                            grad = grad.permute(0, 2, 1).reshape(grad.shape[0], grad_channels, sqrt_K, sqrt_K)
+
+                        uncertainty = torch.abs(grad).max(dim=1, keepdim=True)[0]
+                        
+                        #if uncertainty.shape[-2:] != 128:
+                        #    #print(height)
+                        #    uncertainty = torch.nn.functional.interpolate(
+                        #        uncertainty, size=128, mode='bilinear', align_corners=False
+                        #    )
+                        uncertainty_maps[t.item()][layer_idx] = uncertainty.detach().cpu()
+                
+                    
                 # predict noise model_output
-                noise_pred = self.transformer(
-                    latent_model_input,
-                    encoder_hidden_states=prompt_embeds,
-                    encoder_attention_mask=prompt_attention_mask,
-                    timestep=current_timestep,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
+                with torch.no_grad():
+                    noise_pred = self.transformer(
+                        latent_model_input,
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                        timestep=current_timestep,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -875,6 +954,29 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                     noise_pred = noise_pred
 
                 # compute previous image: x_t -> x_t-1
+
+                if apply_var_method_uc:
+                    _, pixel_wise_uncertainty = get_uncertainty_guided_score_with_percentile(noise_pred, 
+                                                latent_model_input, 
+                                                t, 
+                                                prompt_embeds, 
+                                                self.transformer, 
+                                                alpha_hat_t=self.scheduler.alphas_cumprod[t], 
+                                                percentile=0.95,
+                                                guidance_scale=guidance_scale, 
+                                                model_type='stable-diffusion-3',
+                                                lr=0.99, 
+                                                extra_diffusion_kwargs=dict( added_cond_kwargs=added_cond_kwargs, encoder_attention_mask =prompt_attention_mask, 
+                                                return_dict=False,))
+                        
+                    tmp_pixel_wise_uncertainty_lst.append(pixel_wise_uncertainty)
+                    if i % 4 == 3:
+                        all_pixel_wise_uncertainty_lst.append(tmp_pixel_wise_uncertainty_lst)
+                        tmp_pixel_wise_uncertainty_lst = []
+
+
+                
+                
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
                 # call the callback, if provided
@@ -886,21 +988,26 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
+                if return_mid_reps:
+                    latents_lst.append(latents)
 
-        if not output_type == "latent":
-            image = self.vae.decode(latents.to(self.vae.dtype) / self.vae.config.scaling_factor, return_dict=False)[0]
-            if use_resolution_binning:
-                image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
-        else:
-            image = latents
+        with torch.no_grad():
+            if not output_type == "latent":
+                image = self.vae.decode(latents.to(self.vae.dtype) / self.vae.config.scaling_factor, return_dict=False)[0]
+                if use_resolution_binning:
+                    image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
+            else:
+                image = latents
 
-        if not output_type == "latent":
-            image = self.image_processor.postprocess(image, output_type=output_type)
+            if not output_type == "latent":
+                image = self.image_processor.postprocess(image, output_type=output_type)
 
-        # Offload all models
-        self.maybe_free_model_hooks()
+            # Offload all models
+            self.maybe_free_model_hooks()
 
-        if not return_dict:
-            return (image,)
+            if not return_dict:
+                return (image,)
 
-        return ImagePipelineOutput(images=image)
+        return ImagePipelineOutput(images=image) , {"uncertainty_maps": uncertainty_maps,  "latents_lst": latents_lst, 
+                                                    "pixel_wise_uncertainty_lst": all_pixel_wise_uncertainty_lst,
+                                                    "aux_list": aux_list}

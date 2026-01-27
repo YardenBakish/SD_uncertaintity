@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 #from diffusers import StableDiffusionPipeline
 from diffusers import DDIMScheduler
-
+from official_supervised_metrics import run_sup_metrics
 from modules.pipeline_stable_diffusion import StableDiffusionPipeline
 from torchmetrics.multimodal import CLIPScore
 from PIL import Image
@@ -23,7 +23,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils import *
 from metrics_clipscore import calculate_clipscore_metric
-
+from metrics_cmmd import mainFunc
 from scipy.ndimage import (
     binary_erosion,
     gaussian_filter,
@@ -297,7 +297,6 @@ def generate_special_batch_map_globalTimestep(latents_batch, agg_type, model_pat
   
     weights = (1 - alpha_t_values) / torch.sqrt(alpha_t_values)
 
-    
     weights = weights[np.array(global_ts)]
     
     use_weights = 'Weighted' in agg_type
@@ -430,6 +429,9 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
                         backup_best_worst = False,
                         num_workers=4,
                         calc_clipscore = False,
+                        calc_cmmd = False,
+                        calc_sup_metrics = False,
+                        calc_grad_fid = False,
                         vis_score_dist = False):
     
     
@@ -578,6 +580,29 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
             
             return
 
+
+        if calc_grad_fid:
+            
+            file_ids = sorted(uncertaintity_maps_dict.items(), key=lambda x: x[1], reverse=False)
+            file_ids = [elem[0] for elem in file_ids]
+            len_file_ids = len(file_ids)
+     
+            for i in range(5):
+                start = i * len_file_ids // 5
+                end = (i + 1) * len_file_ids // 5
+                segment = file_ids[:start] + file_ids[end:]
+                
+                d[i] = compute_fid_custom(fake_dataset_dir, real_dataset_dir, file_indices=segment)
+
+            
+            update_json(f"tmp/res_{method}.json", d)
+              
+               
+
+            
+            return 
+           
+
             
         file_ids = sorted(uncertaintity_maps_dict.items(), key=lambda x: x[1], reverse=True)
         file_ids = [elem[0] for elem in file_ids]
@@ -585,7 +610,25 @@ def generate_map_wrapper(x, method, methods_dict, dirs_dict,
         
         len_file_ids = len(file_ids)
         file_ids_84 = file_ids[int(0.16 * len_file_ids):]
+
+        if calc_sup_metrics:
+            pick_score, hpsv2_score, aes_score = run_sup_metrics(fake_dataset_dir, file_indices = file_ids_84)
+            d["pick_score"] = pick_score
+            d["hpsv2_score"] = hpsv2_score 
+            d["aes_score"] = aes_score
+            update_json(f"{final_output_dir}/res.json", d)
+            return
+
  
+        if calc_cmmd:
+            d["cmmd"] = mainFunc(real_dataset_dir,fake_dataset_dir,file_ids_84)
+           
+            d["cmmd"] = float(d["cmmd"])
+            update_json(f"{final_output_dir}/res.json", d)
+  
+            return 
+
+
         if calc_clipscore:
             d["clipscore"] = calculate_clipscore_metric(fake_dataset_dir, batch_size=5, file_indices = file_ids_84)
             update_json(f"{final_output_dir}/res.json", d)
